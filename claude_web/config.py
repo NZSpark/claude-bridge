@@ -270,6 +270,11 @@ RESPONSE_SELECTORS = env_list(
     'div[data-testid="assistant-message"]||[data-message-author-role="assistant"]'
     '||div.font-claude-message||div[class*="font-claude-message"]',
 )
+# 用户消息节点（只用于「本轮提问是否已经落到页面上」的结构信号，不参与正文读取）。
+USER_MESSAGE_SELECTORS = env_list(
+    "USER_MESSAGE_SELECTORS",
+    'div[data-testid="user-message"]||[data-message-author-role="user"]',
+)
 GENERATING_SELECTORS = env_list(
     "GENERATING_SELECTORS",
     'button[aria-label*="Stop"]||button[data-testid*="stop"]||[data-is-streaming="true"]',

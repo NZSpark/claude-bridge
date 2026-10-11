@@ -5,12 +5,13 @@
 * :mod:`claude_web.completion.extractor`——只提取本轮**新增**的 assistant 回复。
 """
 
-from .extractor import ReplyExtractor, ReplyRead
+from .extractor import ReplyBaseline, ReplyExtractor, ReplyRead
 from .generator import GenerationResult, ReplyGenerator
 from .lifecycle import Conversation, SessionLifecycle
 
 __all__ = [
     "ReplyExtractor",
+    "ReplyBaseline",
     "ReplyRead",
     "GenerationResult",
     "ReplyGenerator",

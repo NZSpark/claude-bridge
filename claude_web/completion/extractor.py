@@ -1,8 +1,13 @@
 """新回复提取（doc/design.md 4.4）。
 
-核心约束：**只提取当前任务新增的 assistant 回复**。提交前记录已存在的回复条数
-（``baseline``），提交后只读取 ``baseline`` 之外的新节点，避免把上一轮残留文本
-当成本轮输出。
+核心约束：**只提取当前任务新增的 assistant 回复**。提交前记录页面的回复状态
+（``baseline``：assistant 条数 + 最后一条提问的条数 / 文本指纹），提交后只用
+``baseline`` 之外的新节点，避免把上一轮残留文本当成本轮输出。
+
+⚠️ 判定不能只看 assistant 条数：真实页面上新增本轮回复时可能同时回收 / 复用旧行
+（条数停在基线上），只看条数会漏判，把一次**页面上明明已经回答**的请求报成
+``reply_not_found``（事故 2026-10-12）。因此 :meth:`ReplyExtractor.read_new` 用条数与
+「本轮提问是否已落到页面上且其后已有 assistant 节点」两把独立的钥匙（见 4.4）。
 
 除了「新旧回复」这层，还有「节点里哪些文本属于正文」这层：assistant 节点同时包含
 无障碍标题、动作栏、时间戳与推广行。DOM 侧（``COMPLETE_TEXT_JS`` + 可配置的
@@ -18,7 +23,7 @@ import re
 from dataclasses import dataclass
 from typing import Any, Optional
 
-from ..browser.dom_adapter import ClaudeDOMAdapter
+from ..browser.dom_adapter import ClaudeDOMAdapter, ReplyState
 
 logger = logging.getLogger(__name__)
 
@@ -94,6 +99,19 @@ def strip_page_chrome(text: str) -> str:
 
 
 @dataclass
+class ReplyBaseline:
+    """提交前的页面回复状态指纹（doc/design.md 4.4）。
+
+    * ``count``：assistant 节点条数；
+    * ``user_count`` / ``user_tail``：页面上最后一条提问的条数与文本尾巴。
+    """
+
+    count: int = 0
+    user_count: int = 0
+    user_tail: Optional[str] = None
+
+
+@dataclass
 class ReplyRead:
     """一次回复读取结果。"""
 
@@ -101,6 +119,14 @@ class ReplyRead:
     count: int = 0
     is_new: bool = False
     selector: Optional[str] = None
+    #: 同时读到的 user 消息条数（诊断）。
+    user_count: int = 0
+    #: 读取时「最后一条 assistant 节点是否排在最后一条 user 消息之后」（诊断）：
+    #: 失败时用它区分「页面根本没渲染回复节点」与「渲染了但条数口径没认出来」。
+    trailing: bool = False
+    #: ``True`` = 这条新回复是靠**结构信号**认出来的（assistant 条数当时停在基线上）。
+    #: 正常轮次为 ``False``；出现 ``True`` 就说明条数口径那一刻失灵了（诊断用）。
+    structural: bool = False
 
     @property
     def normalized(self) -> str:
@@ -121,22 +147,91 @@ class ReplyExtractor:
     def __init__(self, dom: Optional[ClaudeDOMAdapter] = None) -> None:
         self.dom = dom or ClaudeDOMAdapter()
 
-    async def baseline(self, page: Any) -> int:
-        """记录提交前的回复条数。"""
-        return await self.dom.reply_count(page)
+    async def baseline(self, page: Any) -> ReplyBaseline:
+        """记录提交前的回复 / 提问状态指纹。
 
-    async def read_new(self, page: Any, baseline: int) -> ReplyRead:
-        """读取 ``baseline`` 之后的最新回复；还没有新回复时返回 ``is_new=False``。"""
-        count = await self.dom.reply_count(page)
-        if count <= baseline:
-            return ReplyRead(text="", count=count, is_new=False)
+        除 assistant 条数外还记下「最后一条提问」：只比条数会漏判（doc/design.md 4.4，
+        事故 2026-10-12：页面上已有回复，却因为条数没涨而报 ``reply_not_found``）。
+        """
+        state = await self.dom.reply_state(page, want_tail=True)
+        return ReplyBaseline(
+            count=state.reply_count,
+            user_count=state.user_count,
+            user_tail=state.last_user_tail,
+        )
+
+    async def read_new(self, page: Any, baseline: ReplyBaseline) -> ReplyRead:
+        """读取 ``baseline`` 之后的最新回复；还没有新回复时返回 ``is_new=False``。
+
+        判定用**两把独立的钥匙**（任一成立即算新回复）：
+
+        1. **条数**：assistant 节点比基线多（改造前的唯一口径）；
+        2. **结构**：页面上最后一条提问已经不是基线那一条，且其后已经出现 assistant
+           节点——这条与条数无关，所以页面回收 / 复用旧行（条数停在基线上）时依然能认出回复。
+
+        两把都不成立才算「还没有新回复」。指纹读不到时（旧页面 / 替身页面）退回只看条数，
+        与改造前的行为一致。
+        """
+        state = await self.dom.reply_state(page)
+        if state.reply_count > baseline.count:
+            snapshot = await self.dom.read_reply_text(page, index=-1)
+            return ReplyRead(
+                text=snapshot.text,
+                count=state.reply_count,
+                is_new=True,
+                selector=snapshot.selector,
+                user_count=state.user_count,
+                trailing=state.trailing_reply,
+            )
+        # 条数没涨：只有「页面已经在回答本轮的提问」才算有新回复。不能仅凭页面上存在
+        # 一条 assistant 节点就下结论——那可能还是上一条回复（会把旧正文当成新回复返回）。
+        if not state.trailing_reply or not await self._newer_turn(page, state, baseline):
+            return ReplyRead(
+                count=state.reply_count,
+                user_count=state.user_count,
+                trailing=state.trailing_reply,
+                is_new=False,
+            )
         snapshot = await self.dom.read_reply_text(page, index=-1)
+        # 每一轮轮询都会走到这里，所以用 DEBUG；「本轮回复是靠结构信号认出来的」那条
+        # 一次性 INFO 由生成循环记（见 generator.generate）。
+        logger.debug(
+            "[回复] assistant 条数停在基线上（%s），靠结构信号认出本轮回复（提问 %s→%s）",
+            baseline.count,
+            baseline.user_count,
+            state.user_count,
+        )
         return ReplyRead(
             text=snapshot.text,
-            count=count,
+            count=state.reply_count,
             is_new=True,
             selector=snapshot.selector,
+            user_count=state.user_count,
+            trailing=state.trailing_reply,
+            structural=True,
         )
+
+    async def _newer_turn(
+        self, page: Any, state: ReplyState, baseline: ReplyBaseline
+    ) -> bool:
+        """页面上最后一条提问是否已经不是基线那一条（= 本轮提问已落到页面上）。
+
+        保守口径：
+
+        * ``user`` 条数**变多** → 是本轮；
+        * 条数**一样**时比最后一条提问的文本指纹（页面回收旧行时条数不变，但指纹会变）；
+        * 条数变少 / 指纹读不到 → 当作「还是基线那一条」，留待下一轮或退到条数口径
+          （宁可不认，也不能把上一条回复当成新回复返回）。
+        """
+        if state.user_count > baseline.user_count:
+            return True
+        if state.user_count != baseline.user_count:
+            return False
+        probed = await self.dom.reply_state(page, want_tail=True)
+        tail = probed.last_user_tail
+        if not tail or not baseline.user_tail:
+            return False
+        return tail != baseline.user_tail
 
     async def read_latest(self, page: Any) -> ReplyRead:
         """读取最后一条回复（不区分新旧，用于恢复场景核对页面现状）。"""
@@ -147,4 +242,10 @@ class ReplyExtractor:
         return ReplyRead(text=snapshot.text, count=count, is_new=True, selector=snapshot.selector)
 
 
-__all__ = ["ReplyExtractor", "ReplyRead", "normalize_reply", "strip_page_chrome"]
+__all__ = [
+    "ReplyExtractor",
+    "ReplyBaseline",
+    "ReplyRead",
+    "normalize_reply",
+    "strip_page_chrome",
+]

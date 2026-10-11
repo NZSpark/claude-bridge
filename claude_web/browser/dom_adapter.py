@@ -29,6 +29,9 @@ from .diagnostics import DiagnosticsMixin
 
 logger = logging.getLogger(__name__)
 
+#: 用户消息身份指纹保留的字符数（只做相等比较，不落盘、不进日志）。
+_USER_TAIL_CHARS = 200
+
 #: 安全校验页的判定不走单独常量：文案特征集中在
 #: :data:`claude_web.config.CHALLENGE_TEXT_PATTERNS`，标题与可见文本共用同一份
 #: 口径，避免两处清单漂移。
@@ -110,6 +113,37 @@ class GeneratingState:
             "stop_control": self.stop_control,
             "selector": self.selector,
             "reason": self.reason,
+        }
+
+
+@dataclass
+class ReplyState:
+    """页面上「回复 / 提问」的结构状态（doc/design.md 4.4）。
+
+    * ``reply_count``：assistant 节点条数（原来的唯一口径）；
+    * ``user_count``：user 消息条数；
+    * ``trailing_reply``：最后一条 assistant 节点是否排在最后一条 user 消息之后
+      （= 页面已经在回答眼下最后那条提问）；
+    * ``last_user_tail``：最后一条 user 消息的文本尾巴（身份指纹，仅用于相等比较）。
+
+    条数口径单独不够用：真实页面上新增本轮回复时可能同时回收 / 复用旧行，
+    条数会停在基线上。结构信号与条数是**两把独立的钥匙**，任一成立即可判定有新回复。
+    """
+
+    reply_count: int = 0
+    reply_selector: Optional[str] = None
+    user_count: int = 0
+    user_selector: Optional[str] = None
+    trailing_reply: bool = False
+    last_user_tail: Optional[str] = None
+
+    def as_detail(self) -> dict:
+        """诊断用摘要（只含计数与布尔，不含页面正文）。"""
+        return {
+            "reply_count": self.reply_count,
+            "user_count": self.user_count,
+            "trailing_reply": self.trailing_reply,
+            "reply_selector": self.reply_selector,
         }
 
 
@@ -470,6 +504,40 @@ class ClaudeDOMAdapter(DiagnosticsMixin):
         _, nodes = await self._reply_nodes(page)
         return len(nodes)
 
+    async def reply_state(self, page: Any, *, want_tail: bool = False) -> ReplyState:
+        """一次页面内查询拿到「条数 + 结构信号」（doc/design.md 4.4）。
+
+        探针本身失败时**退化**为原来的逐选择器计数（结构信号按未知处理），
+        这样旧页面 / 替身页面上的行为与改造前一致，不会把探测失败变成新的失败模式。
+        """
+        try:
+            info = await page.evaluate(
+                selectors.REPLY_STATE_JS,
+                {
+                    "reply": list(config.RESPONSE_SELECTORS),
+                    "user": list(config.USER_MESSAGE_SELECTORS),
+                    "want_tail": bool(want_tail),
+                    "tail_chars": _USER_TAIL_CHARS,
+                },
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("[DOM] 回复结构探测失败：%s", type(exc).__name__)
+            info = None
+        if isinstance(info, dict):
+            try:
+                tail = info.get("last_user_tail")
+                return ReplyState(
+                    reply_count=int(info.get("reply_count") or 0),
+                    reply_selector=info.get("reply_selector"),
+                    user_count=int(info.get("user_count") or 0),
+                    user_selector=info.get("user_selector"),
+                    trailing_reply=bool(info.get("trailing_reply")),
+                    last_user_tail=None if tail is None else str(tail),
+                )
+            except (TypeError, ValueError) as exc:  # noqa: BLE001
+                logger.debug("[DOM] 回复结构探测返回异常值：%s", type(exc).__name__)
+        return ReplyState(reply_count=await self.reply_count(page))
+
     async def read_reply_text(self, page: Any, index: int = -1) -> ReplySnapshot:
         """读取第 ``index`` 条回复的完整文本（``-1`` = 最后一条）。"""
         selector, nodes = await self._reply_nodes(page)
@@ -503,4 +571,10 @@ class ClaudeDOMAdapter(DiagnosticsMixin):
         return ReplySnapshot(text=text, count=len(nodes), selector=selector)
 
 
-__all__ = ["ClaudeDOMAdapter", "GeneratingState", "PageStatus", "ReplySnapshot"]
+__all__ = [
+    "ClaudeDOMAdapter",
+    "GeneratingState",
+    "PageStatus",
+    "ReplySnapshot",
+    "ReplyState",
+]

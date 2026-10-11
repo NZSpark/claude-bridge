@@ -3,7 +3,7 @@
 流程：
 
 1. 确认页面可用（未登录 / 挑战 / 无输入区都以语义化异常结束）；
-2. 记录提交前的回复条数（baseline）；
+2. 记录提交前的回复状态（baseline：assistant 条数 + 最后一条提问的指纹）；
 3. 填充输入区（失败可安全重试——此时**尚无副作用**）并提交；
 4. 轮询回复快照，用 :func:`claude_web.end_detection.evaluate_poll` 判定结束；
 5. 需要工具时**缓冲整段回复**再解析，避免把内部工具标记泄漏到普通文本里。
@@ -38,7 +38,7 @@ from ..errors import (
 )
 from ..models import ToolCall, ToolSpec
 from ..toolcalls import ParsedToolCalls, parse_tool_calls, strip_tool_call_blocks
-from .extractor import ReplyExtractor, normalize_reply
+from .extractor import ReplyBaseline, ReplyExtractor, ReplyRead, normalize_reply
 
 logger = logging.getLogger(__name__)
 
@@ -165,7 +165,7 @@ class ReplyGenerator:
         buffered = bool(tool_list) and config.TOOL_CALL_BUFFER
 
         await self.dom.ensure_usable(page)
-        baseline = await self.extractor.baseline(page)
+        baseline: ReplyBaseline = await self.extractor.baseline(page)
 
         await self._fill(page, prompt)
         await self.dom.submit(page)
@@ -184,6 +184,10 @@ class ReplyGenerator:
         polls = 0
         rewritten = False
         emitted = ""
+        #: 最近一次回复读取结果（失败时把条数写进日志 / 错误详情，便于下次定位）。
+        last_read: Optional[ReplyRead] = None
+        #: 「结构信号认出回复」是否已记过一条日志（正常轮次不会触发）。
+        structural_logged = False
         #: 下一轮轮询间隔：活跃期用短间隔，静止期用基础间隔（见 _next_interval）。
         interval = self.active_poll_interval
         #: 「会话到顶」扫描是否已做过（每轮任务最多一次，且在失败判定点才做）。
@@ -192,14 +196,33 @@ class ReplyGenerator:
         #: 页面静止时断定提交没生效，用于快路径报错，避免空等到绝对超时。
         prompt_in_composer: Optional[bool] = None
 
+        def _counts_detail() -> dict:
+            """把「条数口径」的现场写进日志 / 错误详情（只有计数，不含页面正文）。"""
+            read_count = last_read.count if last_read is not None else None
+            read_users = last_read.user_count if last_read is not None else None
+            trailing = last_read.trailing if last_read is not None else None
+            return {
+                "reply_count": read_count,
+                "reply_baseline": baseline.count,
+                "user_count": read_users,
+                "user_baseline": baseline.user_count,
+                # 「页面上最后一条回复是不是排在本轮提问之后」：区分「页面根本没渲染回复」
+                # 与「渲染了但条数口径没认出来」（后者已被结构信号救回，见 4.4）。
+                "trailing_reply": trailing,
+            }
+
         def _log_end(reason: str, *, chars: int = 0) -> None:
             """记一条不含正文的收尾日志：以后「客户端一直等到超时」能直接从日志看出来。"""
             logger.info(
-                "[生成] %s：轮询 %s 次，正文 %s 字符，曾经生成中=%s",
+                "[生成] %s：轮询 %s 次，正文 %s 字符，曾经生成中=%s，assistant %s/基线 %s，提问 %s/基线 %s",
                 reason,
                 polls,
                 chars,
                 state.saw_generating,
+                last_read.count if last_read is not None else "-",
+                baseline.count,
+                last_read.user_count if last_read is not None else "-",
+                baseline.user_count,
             )
 
         while True:
@@ -210,9 +233,21 @@ class ReplyGenerator:
                 raise GenerationStalledError("生成已取消", detail={"polls": polls})
 
             read = await self.extractor.read_new(page, baseline)
+            last_read = read
             if read.is_new:
                 reply_seen = True
                 normalized = normalize_reply(read.text)
+                if read.structural and not structural_logged:
+                    # 正常轮次不会走到这里：一旦出现，说明**条数口径当时失灵**，
+                    # 而结构信号把这一轮救了回来（下次查日志能直接看到）。
+                    structural_logged = True
+                    logger.info(
+                        "[生成] 本轮回复是靠结构信号认出来的：assistant 条数 %s（基线 %s），提问 %s→%s",
+                        read.count,
+                        baseline.count,
+                        baseline.user_count,
+                        read.user_count,
+                    )
             content_changed = reply_seen and (
                 normalized != last_normalized or len(normalized) != last_len
             )
@@ -309,7 +344,7 @@ class ReplyGenerator:
                     _log_end("失败：未识别到本轮回复")
                     raise ReplyNotFoundError(
                         "提交后未识别到本轮回复（页面无新增 assistant 节点）",
-                        detail={"polls": polls, "note": verdict.note},
+                        detail={"polls": polls, "note": verdict.note, **_counts_detail()},
                     )
                 _log_end("失败：生成停滞", chars=len(normalized))
                 raise GenerationStalledError(
@@ -322,7 +357,9 @@ class ReplyGenerator:
                 )
 
         if not reply_seen:
-            raise ReplyNotFoundError("未识别到本轮回复", detail={"polls": polls})
+            raise ReplyNotFoundError(
+                "未识别到本轮回复", detail={"polls": polls, **_counts_detail()}
+            )
         _log_end(f"完成（{verdict.note or '正文稳定'}）", chars=len(normalized))
 
         # 最终快照可能比轮询中读到的更完整，这里再读一次。

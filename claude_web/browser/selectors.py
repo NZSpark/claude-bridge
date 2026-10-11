@@ -12,7 +12,7 @@
 """
 
 #: 选择器 / DOM 提取逻辑的版本号：Claude 网页改版导致选择器失效时用于诊断。
-SELECTOR_VERSION = "2026-10-12"
+SELECTOR_VERSION = "2026-10-12.1"
 
 # ---- JS 片段 ----
 
@@ -211,6 +211,57 @@ BODY_TEXT_JS = """
     }
     """
 
+# 回复节点的**结构状态**：条数 + 「最后一条 assistant 是否排在最后一条 user 之后」。
+#
+# 为什么不能只看条数（事故 2026-10-12）：``read_new`` 原来只比较 assistant 节点**条数**
+# 与提交前的基线。真实页面上这个口径会漏判：只要新增本轮回复的同时旧行不再命中
+# （React 复用同一个下标 / 回收旧行，或查询短暂失败），``count <= baseline`` 就永远成立，
+# 于是页面上明明已经出现回答，却一路轮询到停滞，最后报 ``reply_not_found``
+# （用户看到的是「网页明明回了，桥却说没识别到」）。
+#
+# 因此补一个与条数无关的结构信号：**页面上最后一条 assistant 节点是否排在最后一条
+# user 消息之后**（= 页面已经在回答「眼下最后那条提问」），并用最后一条 user 消息的
+# 文本尾巴作为「基线那一条提问」的身份指纹——指纹变了就说明本轮提问已经落到页面上。
+# 只回计数、布尔与文本尾巴（调用方只拿它做相等比较，不落盘、不写日志）。
+REPLY_STATE_JS = """
+    (opts) => {
+      const pick = (list) => {
+        for (const selector of (list || [])) {
+          try {
+            const nodes = document.querySelectorAll(selector);
+            if (nodes.length) return { selector: selector, nodes: Array.from(nodes) };
+          } catch (e) {}
+        }
+        return { selector: null, nodes: [] };
+      };
+      const reply = pick(opts.reply);
+      const user = pick(opts.user);
+      let trailing = false;
+      if (reply.nodes.length && user.nodes.length) {
+        const lastReply = reply.nodes[reply.nodes.length - 1];
+        const lastUser = user.nodes[user.nodes.length - 1];
+        try {
+          trailing = !!(lastUser.compareDocumentPosition(lastReply) &
+                        Node.DOCUMENT_POSITION_FOLLOWING);
+        } catch (e) { trailing = false; }
+      }
+      let tail = null;
+      if (opts.want_tail && user.nodes.length) {
+        const lastUser = user.nodes[user.nodes.length - 1];
+        const text = String(lastUser.innerText || lastUser.textContent || '');
+        tail = text.replace(/\\s+/g, ' ').trim().slice(-(opts.tail_chars || 200));
+      }
+      return {
+        reply_selector: reply.selector,
+        reply_count: reply.nodes.length,
+        user_selector: user.selector,
+        user_count: user.nodes.length,
+        trailing_reply: trailing,
+        last_user_tail: tail,
+      };
+    }
+    """
+
 #: 「生成中」探测的硬编码兜底选择器（config 候选全落空时仍可用）。
 GENERATING_FALLBACK = 'button[aria-label*="Stop"], [data-is-streaming="true"]'
 
@@ -220,5 +271,6 @@ __all__ = [
     "GENERATING_STATE_JS",
     "PAGE_PROBE_JS",
     "BODY_TEXT_JS",
+    "REPLY_STATE_JS",
     "GENERATING_FALLBACK",
 ]
