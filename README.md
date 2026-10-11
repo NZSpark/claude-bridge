@@ -154,8 +154,11 @@ curl http://127.0.0.1:8003/v1/chat/completions -H 'Content-Type: application/jso
 | `CLAUDE_DEFAULT_LINK_URL` | 空 | 缺省初始会话链接（**仅默认桶**生效，见下） |
 | `USER_DATA_DIR` | `./user_data` | Chromium 登录 profile（**勿提交到 Git**） |
 | `HEADLESS` | `false` | 建议保持有头 |
-| `CLAUDE_TIMEOUT` / `POLL_INTERVAL_S` | `300` / `1.5` | 单轮绝对超时 / 轮询间隔 |
-| `STABLE_POLLS` / `QUIET_POLLS` / `STALL_POLLS` | `4` / `4` / `20` | 结束与停滞判定 |
+| `CLAUDE_TIMEOUT` | `300` | 单轮绝对超时（秒） |
+| `POLL_INTERVAL_S` / `POLL_INTERVAL_ACTIVE_S` | `1.5` / `0.4` | 页面静止 / 活跃时的轮询间隔（秒，只影响「多快看到变化」） |
+| `SETTLE_S` / `SETTLE_NO_SIGNAL_S` | `2.5` / `6` | 页面自述已结束 / 探不到生成信号时，内容静默多久算完成（秒） |
+| `SUBMIT_LOST_S` / `STALL_S` | `6` / `30` | 判定「提交未生效」/「停滞」所需的静止时长（秒） |
+| `REPLY_CHROME_SELECTORS` | 见 `.env.example` | 回复节点里要剔除的页面外壳（无障碍标题 / 动作栏 / 时间戳 / 推广行） |
 | `SESSION_KEY_HEADER` | `X-Claude-Session` | 会话分桶请求头 |
 | `MAX_SESSION_BUCKETS` / `BUCKET_LOCK_TIMEOUT_S` | `4` / `120` | 桶上限 / 同桶等待超时 |
 | `CLAUDE_MAX_CONTEXT_CHARS` | `100000` | 桥接层独立的字符预算 |
@@ -164,6 +167,12 @@ curl http://127.0.0.1:8003/v1/chat/completions -H 'Content-Type: application/jso
 
 `.env.example`、`claude_web/config.py` 与本文档构成配置契约，
 `tests/test_config_drift.py` 会阻止三者漂移。
+
+> 结束与停滞判定曾用「连续轮询次数」开关（`STABLE_POLLS` / `QUIET_POLLS` / `STALL_POLLS`）。
+> 这三项**已废弃并被忽略**，改用时长开关 `SETTLE_S` / `SETTLE_NO_SIGNAL_S` / `STALL_S`：
+> 轮询次数阈值会把「等多久才算结束」和「多久轮询一次」绑在一起，调快轮询就同时缩短了
+> 停滞保护。若你的 `.env` 里还有旧键，直接删掉即可（新键默认值与原行为等价，只有收尾
+> 更快：`QUIET_POLLS=4 × 1.5s` → `SETTLE_S=2.5`）。
 
 ## 安全边界
 
@@ -182,6 +191,7 @@ curl http://127.0.0.1:8003/v1/chat/completions -H 'Content-Type: application/jso
 .venv/bin/python -m pytest -q          # 默认套件：不联网、不起浏览器
 .venv/bin/ruff check .                 # 静态检查
 CLAUDE_E2E=1 .venv/bin/python -m pytest tests/e2e -q   # 真实浏览器 E2E（默认 skip）
+.venv/bin/python tools/bench_pipeline.py   # 内容处理链路基准（离线，对比改动前后的等待秒数）
 ```
 
 默认套件用 FakeDriver / FakePage 驱动真实的 DOM 适配器与生成状态机，覆盖协议转换、
@@ -202,7 +212,15 @@ CLAUDE_E2E=1 .venv/bin/python -m pytest tests/e2e -q   # 真实浏览器 E2E（�
   字符数）。「提交未生效」会以 `prompt_submission_failed` 快速返回；页面空闲且正文无
   增长会以 `generation_stalled` 提前结束，都不会再空等到 `generation_timeout`。若仍出现
   绝对超时，说明页面确实一直报「生成中」（``data-is-streaming=true`` 或可见停止按钮）。
+- **回复已经出来了，客户端却还多等几秒**：收尾等待由 `SETTLE_S`（默认 2.5s）决定——
+  页面自述已结束、正文连续静默满这个时长才收尾。调小它见效最快，但太小时会在模型
+  「分段输出之间的停顿」处提前收尾、把回复截断。判定阈值都是**时长**，因此调快
+  `POLL_INTERVAL_ACTIVE_S` 不会削弱结束 / 停滞保护。
 - **回复被截断 / 结果为空**：用 `GET /diagnostics` 看 `selector_version` 与选择器命中数，
   多数是站点改版导致回复节点选择器落空。
+- **正文里混进页面文字**（同一段正文出现两遍、结尾多出 `just now` / `13 minutes ago`、
+  或 `Claude responded:` / `Claude works directly with your codebase`）：回复节点里除了模型
+  正文还有无障碍标题、动作栏、时间戳与推广行，默认由 `REPLY_CHROME_SELECTORS` 剔除；
+  站点改版把新的外壳混进来时，把对应选择器加进这项配置即可（无需改代码）。
 - **`challenge_required`**：在普通浏览器里先完成一次人工验证；本项目**不**自动绕过验证。
   若页面其实可用（能打字），只会记为 `challenge_suspect` 诊断提示，不阻断请求。

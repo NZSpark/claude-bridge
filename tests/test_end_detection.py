@@ -1,81 +1,105 @@
-"""结束判定状态机（doc/design.md 4.4、11.1）。"""
+"""结束判定状态机（doc/design.md 4.4、11.1）。
+
+判定阈值全部是**时长**（秒）：调用方用 :class:`IdleClock` 累加「页面静止了多久」，
+状态机只做比较。下面的用例因此不再模拟轮询序列，而是直接给 ``idle_seconds``，
+这也顺带证明了「轮询快慢不影响判定语义」。
+"""
 
 from __future__ import annotations
 
-from claude_web.end_detection import EndLimits, EndState, evaluate_poll
+from claude_web.end_detection import EndLimits, EndState, IdleClock, evaluate_poll
 
-LIMITS = EndLimits(quiet_polls=2, stable_polls=2, stall_limit=3, extend_step_s=10.0)
+LIMITS = EndLimits(
+    settle_s=2.0,
+    settle_no_signal_s=6.0,
+    stall_s=30.0,
+    submit_lost_s=6.0,
+    extend_step_s=10.0,
+)
 
 
 def test_finishes_when_settled_and_quiet():
     state = EndState(saw_generating=True)
-    # 第一轮：内容刚出现，generating=True -> continue
-    v = evaluate_poll(state, limits=LIMITS, reply_seen=True, generating=True, normalized="Hi")
+    # 页面已落定但静默不足 -> 继续等
+    v = evaluate_poll(
+        state, limits=LIMITS, reply_seen=True, generating=False,
+        idle_seconds=1.9, has_text=True,
+    )
     assert v.action == "continue"
-    state = v.state
-    # 第二轮：内容不变但仍在生成 -> continue
-    v = evaluate_poll(state, limits=LIMITS, reply_seen=True, generating=True,
-                      normalized="Hi", last_normalized="Hi", last_len=2)
-    assert v.action == "continue"
-    state = v.state
-    # 第三轮：生成结束，静默计数 1 < quiet_polls
-    v = evaluate_poll(state, limits=LIMITS, reply_seen=True, generating=False,
-                      normalized="Hi", last_normalized="Hi", last_len=2)
-    assert v.action == "continue"
-    # 第四轮：静默计数 2 >= quiet_polls -> finish
-    v = evaluate_poll(v.state, limits=LIMITS, reply_seen=True, generating=False,
-                      normalized="Hi", last_normalized="Hi", last_len=2)
+    # 静默满 settle_s -> 收尾
+    v = evaluate_poll(
+        v.state, limits=LIMITS, reply_seen=True, generating=False,
+        idle_seconds=2.0, has_text=True,
+    )
     assert v.action == "finish"
     assert "静默" in v.note
 
 
-def test_content_change_resets_quiet_counter():
-    state = EndState(saw_generating=True, quiet_count=1)
-    v = evaluate_poll(state, limits=LIMITS, reply_seen=True, generating=False,
-                      normalized="Hi there", last_normalized="Hi", last_len=2)
+def test_settled_requires_text_and_reply_node():
+    """还没读到任何正文时，即使静止很久也不能算「结束」。"""
+    state = EndState(saw_generating=True)
+    v = evaluate_poll(
+        state, limits=LIMITS, reply_seen=False, generating=False, idle_seconds=3.0
+    )
     assert v.action == "continue"
-    assert v.state.quiet_count == 0
+    v = evaluate_poll(
+        state, limits=LIMITS, reply_seen=True, generating=False,
+        idle_seconds=3.0, has_text=False,
+    )
+    assert v.action == "continue"
 
 
-def test_fallback_stable_when_no_generating_signal():
-    state = EndState()
-    # 第一轮：正文刚出现，尚不稳定。
-    v = evaluate_poll(state, limits=LIMITS, reply_seen=True, generating=None, normalized="Answer")
+def test_idle_clock_resets_on_generation_and_on_growth():
+    clock = IdleClock()
+    assert clock.update(10.0, generating=False, content_changed=False) == 0.0  # 首轮起步
+    assert clock.update(11.0, generating=False, content_changed=False) == 1.0
+    # 正文增长 -> 归零
+    assert clock.update(12.0, generating=False, content_changed=True) == 0.0
+    assert clock.update(13.0, generating=False, content_changed=False) == 1.0
+    # 页面自述仍在生成（例如分段之间的思考）-> 归零
+    assert clock.update(14.0, generating=True, content_changed=False) == 0.0
+    assert clock.update(15.0, generating=True, content_changed=False) == 0.0
+    assert clock.update(16.0, generating=False, content_changed=False) == 1.0
+
+
+def test_no_signal_fallback_needs_longer_quiet():
+    state = EndState()  # 从未观测到生成信号
+    v = evaluate_poll(
+        state, limits=LIMITS, reply_seen=True, generating=None,
+        idle_seconds=2.0, has_text=True,
+    )
     assert v.action == "continue"
-    # 第二轮：内容与上轮相同，稳定计数 1 < max(stable_polls, quiet_polls)。
-    v = evaluate_poll(v.state, limits=LIMITS, reply_seen=True, generating=None,
-                      normalized="Answer", last_normalized="Answer", last_len=6)
-    assert v.action == "continue"
-    # 第三轮：稳定计数达标 -> finish（停止控件始终探测不到时的兜底）。
-    v = evaluate_poll(v.state, limits=LIMITS, reply_seen=True, generating=None,
-                      normalized="Answer", last_normalized="Answer", last_len=6)
+    v = evaluate_poll(
+        state, limits=LIMITS, reply_seen=True, generating=None,
+        idle_seconds=LIMITS.settle_no_signal_s, has_text=True,
+    )
     assert v.action == "finish"
-    assert not v.state.saw_generating
+    assert "未观测到生成信号" in v.note
+    assert v.state.saw_generating is False
 
 
-def test_stall_fails_without_any_signal():
+def test_stall_fails_after_stall_window_without_any_reply():
     state = EndState()
-    for _ in range(2):
-        v = evaluate_poll(state, limits=LIMITS, reply_seen=False, generating=None)
-        assert v.action == "continue"
-        state = v.state
-    v = evaluate_poll(state, limits=LIMITS, reply_seen=False, generating=None)
+    v = evaluate_poll(state, limits=LIMITS, reply_seen=False, generating=False, idle_seconds=29.9)
+    assert v.action == "continue"
+    v = evaluate_poll(state, limits=LIMITS, reply_seen=False, generating=False, idle_seconds=30.0)
     assert v.action == "fail_stalled"
+    assert v.submit_lost is False
 
 
 def test_stall_still_counts_after_generating_was_seen():
-    """回归：页面一旦出现过生成信号，无增长计时不能被闩锁关掉。
+    """回归：页面一旦出现过生成信号，停滞计时不能被闩锁关掉。
 
     旧实现在这里会一路 ``continue`` 到绝对超时：实测客户端等了 RESPONSE_TIMEOUT_S 秒
     （快照 goal=「命令超时，重新发送」、reply_chars=0）才拿到 ``generation_timeout``，
     而页面早就静止了。
     """
     state = EndState(saw_generating=True)
-    for _ in range(LIMITS.stall_limit - 1):
-        v = evaluate_poll(state, limits=LIMITS, reply_seen=False, generating=False)
-        assert v.action == "continue"
-        state = v.state
-    v = evaluate_poll(state, limits=LIMITS, reply_seen=False, generating=False)
+    v = evaluate_poll(state, limits=LIMITS, reply_seen=False, generating=False, idle_seconds=10.0)
+    assert v.action == "continue"
+    v = evaluate_poll(
+        v.state, limits=LIMITS, reply_seen=False, generating=False, idle_seconds=30.0
+    )
     assert v.action == "fail_stalled"
     assert v.submit_lost is False
 
@@ -83,32 +107,25 @@ def test_stall_still_counts_after_generating_was_seen():
 def test_stall_fires_when_reply_node_stays_empty():
     """新回复节点出现了但正文一直为空、页面也不在生成：同样按卡死收尾。"""
     state = EndState(saw_generating=True)
-    for _ in range(LIMITS.stall_limit - 1):
-        v = evaluate_poll(
-            state, limits=LIMITS, reply_seen=True, generating=False,
-            normalized="", last_normalized="", last_len=0,
-        )
-        assert v.action == "continue"
-        state = v.state
     v = evaluate_poll(
         state, limits=LIMITS, reply_seen=True, generating=False,
-        normalized="", last_normalized="", last_len=0,
+        idle_seconds=30.0, has_text=False,
     )
     assert v.action == "fail_stalled"
     assert v.submit_lost is False
 
 
-def test_lost_submission_reports_submit_lost_before_stall_limit():
-    """输入区里还留着本轮提示词 = 提交没生效：不等卡死窗口，按静默窗口就失败。"""
+def test_lost_submission_reports_submit_lost_before_stall_window():
+    """输入区里还留着本轮提示词 = 提交没生效：不等卡死窗口，按提交窗口失败。"""
     state = EndState()
-    for _ in range(LIMITS.quiet_polls - 1):
-        v = evaluate_poll(
-            state, limits=LIMITS, reply_seen=False, generating=False, submit_landed=False
-        )
-        assert v.action == "continue"
-        state = v.state
     v = evaluate_poll(
-        state, limits=LIMITS, reply_seen=False, generating=False, submit_landed=False
+        state, limits=LIMITS, reply_seen=False, generating=False,
+        idle_seconds=5.9, submit_landed=False,
+    )
+    assert v.action == "continue"
+    v = evaluate_poll(
+        v.state, limits=LIMITS, reply_seen=False, generating=False,
+        idle_seconds=6.0, submit_landed=False,
     )
     assert v.action == "fail_stalled"
     assert v.submit_lost is True
@@ -118,38 +135,19 @@ def test_lost_submission_reports_submit_lost_before_stall_limit():
 def test_unknown_submission_state_keeps_normal_stall_window():
     """输入区读不出来时不能诬告「提交没生效」：仍然等完整的卡死窗口。"""
     state = EndState()
-    for _ in range(LIMITS.quiet_polls):
-        v = evaluate_poll(
-            state, limits=LIMITS, reply_seen=False, generating=False, submit_landed=None
-        )
-        assert v.action == "continue"
-        state = v.state
-    assert v.submit_lost is False
-
-
-def test_growing_text_resets_stall_counter():
-    state = EndState(saw_generating=True, stalled=LIMITS.stall_limit - 1)
     v = evaluate_poll(
-        state, limits=LIMITS, reply_seen=True, generating=False,
-        normalized="abc", last_normalized="ab", last_len=2,
+        state, limits=LIMITS, reply_seen=False, generating=False,
+        idle_seconds=6.0, submit_landed=None,
     )
     assert v.action == "continue"
-    assert v.state.stalled == 0
-
-
-def test_generating_keeps_stall_counter_at_zero():
-    """页面当前确实在生成时不算空转（即使还没有正文）。"""
-    state = EndState(saw_generating=True, stalled=LIMITS.stall_limit - 1)
-    v = evaluate_poll(state, limits=LIMITS, reply_seen=False, generating=True)
-    assert v.action == "continue"
-    assert v.state.stalled == 0
+    assert v.submit_lost is False
 
 
 def test_timeout_with_partial_text_finishes():
     state = EndState(saw_generating=True)
     v = evaluate_poll(
-        state, limits=LIMITS, reply_seen=True, generating=True,
-        normalized="partial", past_deadline=True, extend_budget=0.0, has_partial_text=True,
+        state, limits=LIMITS, reply_seen=True, generating=True, has_text=True,
+        past_deadline=True, extend_budget=0.0,
     )
     assert v.action == "finish"
     assert "超时" in v.note
@@ -158,8 +156,8 @@ def test_timeout_with_partial_text_finishes():
 def test_timeout_extends_while_generating_with_budget():
     state = EndState(saw_generating=True)
     v = evaluate_poll(
-        state, limits=LIMITS, reply_seen=True, generating=True,
-        normalized="x", past_deadline=True, extend_budget=30.0, has_partial_text=False,
+        state, limits=LIMITS, reply_seen=True, generating=True, has_text=False,
+        past_deadline=True, extend_budget=30.0,
     )
     assert v.action == "extend"
     assert v.extend_seconds == 10.0
@@ -168,7 +166,7 @@ def test_timeout_extends_while_generating_with_budget():
 def test_timeout_fails_without_text_or_budget():
     state = EndState(saw_generating=True)
     v = evaluate_poll(
-        state, limits=LIMITS, reply_seen=True, generating=True,
-        normalized="x", past_deadline=True, extend_budget=0.0, has_partial_text=False,
+        state, limits=LIMITS, reply_seen=True, generating=True, has_text=False,
+        past_deadline=True, extend_budget=0.0,
     )
     assert v.action == "fail_timeout"

@@ -8,6 +8,12 @@
 4. 轮询回复快照，用 :func:`claude_web.end_detection.evaluate_poll` 判定结束；
 5. 需要工具时**缓冲整段回复**再解析，避免把内部工具标记泄漏到普通文本里。
 
+时延与轮询策略（doc/design.md 4.4）：结束 / 停滞阈值全部是**时长**，由
+:class:`~claude_web.end_detection.IdleClock` 累加的「页面静止时长」驱动；轮询间隔
+只影响「多快看到变化」：页面活跃时用 ``POLL_INTERVAL_ACTIVE_S``，页面静止后回到
+``POLL_INTERVAL_S``，并且只剩收尾等待时只睡到静默阈值那一刻。「会话到顶」的整页
+扫描只在页面已经静止时做，最多每 5s 一次（流式期间完全不扫）。
+
 重要：提交一旦**可能成功**，就不再无条件重发（doc/design.md 9.3）——因此本模块
 只在提交前重试，提交后只做「读页面现有回复」式的恢复。
 """
@@ -22,7 +28,7 @@ from typing import Awaitable, Callable, List, Optional, Sequence
 
 from .. import config
 from ..browser.dom_adapter import ClaudeDOMAdapter
-from ..end_detection import EndLimits, EndState, evaluate_poll
+from ..end_detection import EndLimits, EndState, IdleClock, evaluate_poll
 from ..errors import (
     ContextLimitError,
     GenerationStalledError,
@@ -40,6 +46,12 @@ logger = logging.getLogger(__name__)
 DeltaCallback = Callable[[str], Awaitable[None]]
 #: 取消探测：返回 True 表示调用方要求中止本轮。
 CancelCheck = Callable[[], bool]
+
+#: 「会话到顶」扫描的最小间隔（秒）。该扫描要读整页可见文本（强制布局），只在页面
+#: 已经静止时才做：正常流式期间完全不扫，静止时也最多每 5s 一次。
+_CONTEXT_SCAN_MIN_INTERVAL_S = 5.0
+#: 单次睡眠的下限（秒），避免退化成忙轮询。
+_MIN_SLEEP_S = 0.05
 
 
 @dataclass
@@ -84,15 +96,48 @@ class ReplyGenerator:
 
     @property
     def poll_interval(self) -> float:
+        """页面静止时的轮询间隔。"""
         return self._poll_interval if self._poll_interval is not None else config.POLL_INTERVAL_S
+
+    @property
+    def active_poll_interval(self) -> float:
+        """页面活跃（在生成 / 正文刚增长）时的轮询间隔；不长于静止间隔。"""
+        return min(config.POLL_INTERVAL_ACTIVE_S, self.poll_interval)
 
     def limits(self) -> EndLimits:
         return EndLimits(
-            quiet_polls=config.QUIET_POLLS,
-            stable_polls=config.STABLE_POLLS,
-            stall_limit=config.STALL_POLLS,
+            settle_s=config.SETTLE_S,
+            settle_no_signal_s=config.SETTLE_NO_SIGNAL_S,
+            stall_s=config.STALL_S,
+            submit_lost_s=config.SUBMIT_LOST_S,
             extend_step_s=max(1.0, config.RESPONSE_TIMEOUT_S),
         )
+
+    def _next_interval(
+        self,
+        *,
+        generating: Optional[bool],
+        content_changed: bool,
+        reply_seen: bool,
+        saw_generating: bool,
+        idle_seconds: float,
+        limits: EndLimits,
+    ) -> float:
+        """下一轮轮询间隔。
+
+        * 页面活跃 → 短间隔（更快把增量交给客户端）；
+        * 页面静止且已读到正文 → 只睡到「静默阈值」那一刻（收尾不再被轮询粒度拖长）；
+        * 其余（等回复出现 / 停滞排查）→ 基础间隔，保持与旧版相同的页面压力。
+        """
+        base = self.poll_interval
+        if generating is True or content_changed:
+            return self.active_poll_interval
+        if reply_seen:
+            deadline = limits.settle_s if saw_generating else limits.settle_no_signal_s
+            remaining = deadline - idle_seconds
+            if remaining > 0:
+                return min(base, max(_MIN_SLEEP_S, remaining + _MIN_SLEEP_S))
+        return base
 
     async def _fill(self, page, prompt: str) -> None:
         """填充输入框；仅在此阶段允许重试（无副作用）。"""
@@ -134,6 +179,7 @@ class ReplyGenerator:
 
         state = EndState()
         limits = self.limits()
+        clock = IdleClock()
         reply_seen = False
         normalized = ""
         last_normalized = ""
@@ -141,8 +187,12 @@ class ReplyGenerator:
         polls = 0
         rewritten = False
         emitted = ""
+        #: 下一轮轮询间隔：活跃期用短间隔，静止期用基础间隔（见 _next_interval）。
+        interval = self.active_poll_interval
+        #: 上一次「会话到顶」整页扫描的时刻（仅在页面静止时才扫）。
+        last_context_scan = float("-inf")
         #: 输入区里是否仍留着本轮提示词（``None`` = 未知）。只有确认「还留着」才能在
-        #: 页面空闲时断定提交没生效，用于快路径报错，避免空等到绝对超时。
+        #: 页面静止时断定提交没生效，用于快路径报错，避免空等到绝对超时。
         prompt_in_composer: Optional[bool] = None
 
         def _log_end(reason: str, *, chars: int = 0) -> None:
@@ -156,8 +206,9 @@ class ReplyGenerator:
             )
 
         while True:
-            await asyncio.sleep(self.poll_interval)
+            await asyncio.sleep(interval)
             polls += 1
+            now = time.monotonic()
             if cancel is not None and cancel():
                 raise GenerationStalledError("生成已取消", detail={"polls": polls})
 
@@ -165,9 +216,15 @@ class ReplyGenerator:
             if read.is_new:
                 reply_seen = True
                 normalized = normalize_reply(read.text)
+            content_changed = reply_seen and (
+                normalized != last_normalized or len(normalized) != last_len
+            )
 
             probe = await self.dom.generating_state(page)
             generating = probe.generating
+            idle_seconds = clock.update(
+                now, generating=generating, content_changed=content_changed
+            )
 
             # 还没有任何新回复时才检查「提交到底有没有生效」：真实页面上提交成功会
             # 立刻清空输入区，所以「输入区里还留着本轮提示词」就是提交没生效的强证据。
@@ -178,12 +235,20 @@ class ReplyGenerator:
                     prompt_in_composer = contains
             submit_landed = None if prompt_in_composer is None else not prompt_in_composer
 
-            # 只在正文开始出现后检查「到顶」提示，避免整页扫描开销。
-            if reply_seen and polls % 4 == 0 and await self.dom.detect_context_limit(page):
-                raise ContextLimitError(
-                    "网页会话已达上下文长度上限，请重置该会话桶",
-                    detail={"polls": polls},
-                )
+            # 「会话到顶」只在页面**已经静止**（正文不再增长）时才可能成立，而且该扫描要读
+            # 整页可见文本（强制布局）：因此流式期间完全不扫，静止时也最多每 5s 一次。
+            # 旧实现按固定轮询次数扫（每 4 轮一次），长回复在流式期间会被反复全页扫描。
+            if (
+                reply_seen
+                and content_changed is False
+                and now - last_context_scan >= _CONTEXT_SCAN_MIN_INTERVAL_S
+            ):
+                last_context_scan = now
+                if await self.dom.detect_context_limit(page):
+                    raise ContextLimitError(
+                        "网页会话已达上下文长度上限，请重置该会话桶",
+                        detail={"polls": polls},
+                    )
 
             past = time.monotonic() > deadline
             verdict = evaluate_poll(
@@ -191,24 +256,21 @@ class ReplyGenerator:
                 limits=limits,
                 reply_seen=reply_seen,
                 generating=generating,
-                normalized=normalized,
-                last_normalized=last_normalized,
-                last_len=last_len,
+                idle_seconds=idle_seconds,
+                has_text=bool(normalized),
                 past_deadline=past,
                 extend_budget=extend_budget,
-                has_partial_text=bool(normalized),
                 submit_landed=submit_landed,
             )
             state = verdict.state
             logger.debug(
-                "[生成] 轮询 %s：reply_seen=%s 正文=%s 字符 生成中=%s(%s) 静默=%s 空转=%s",
+                "[生成] 轮询 %s：reply_seen=%s 正文=%s 字符 生成中=%s(%s) 静止=%.1fs",
                 polls,
                 reply_seen,
                 len(normalized),
                 generating,
                 probe.reason,
-                state.quiet_count,
-                state.stalled,
+                idle_seconds,
             )
 
             # 增量：非工具模式实时推送；工具模式缓冲到结束再解析。
@@ -227,7 +289,18 @@ class ReplyGenerator:
             if verdict.action == "extend":
                 deadline = time.monotonic() + verdict.extend_seconds
                 extend_budget = max(0.0, extend_budget - verdict.extend_seconds)
+                interval = self.active_poll_interval
                 continue
+
+            interval = self._next_interval(
+                generating=generating,
+                content_changed=content_changed,
+                reply_seen=reply_seen,
+                saw_generating=state.saw_generating,
+                idle_seconds=idle_seconds,
+                limits=limits,
+            )
+
             if verdict.action == "fail_stalled":
                 if verdict.submit_lost:
                     _log_end("失败：提交未生效（提示词仍在输入区）")

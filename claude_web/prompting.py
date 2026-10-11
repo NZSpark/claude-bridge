@@ -259,6 +259,20 @@ def normalize_messages(messages: Sequence[ChatMessage]) -> List[NormalizedMessag
     return normalized
 
 
+def _mentions_tool_instructions(
+    messages: Sequence[NormalizedMessage], system_text: str, header: str
+) -> bool:
+    """入站内容里是否已经带了一份工具说明（用于避免重复追加）。
+
+    只在**原始正文**里找约定标题：渲染后的消息会额外加角色标记与 ``[发起工具调用]``
+    载荷，而那两处都不可能产生这个标题，所以扫原始正文与渲染后扫描等价，但不需要
+    把整段历史渲染出来（工具结果单条可达 20k 字符）。
+    """
+    if header and header in system_text:
+        return True
+    return any(header in (m.content or "") for m in messages if m.role != "system")
+
+
 def extract_system_text(messages: Sequence[NormalizedMessage]) -> str:
     """把 system / developer 内容合并成前缀文本（受 ``SYSTEM_MAX_CHARS`` 约束）。"""
     parts = [m.content for m in messages if m.role == "system" and m.content.strip()]
@@ -369,12 +383,12 @@ def build_prompt(
         include_system = seed
     used_messages = list(messages) if seed else delta_messages(messages)
     system_text = extract_system_text(messages)
-    inbound = "\n".join(
-        [system_text] + [_render_message(m) for m in messages if m.role != "system"]
-    )
     tool_text = ""
     # 去重只看**入站消息**：客户端可能已内联一份说明，再追加一份会互相干扰。
-    if tools and TOOLCALL_HEADER not in inbound:
+    #
+    # 这里直接扫原始正文，**不再先把整段历史渲染一遍**：旧写法为了做一次子串判定
+    # 就渲染 + 拼接全部历史（含每条 20k 字符的工具结果），每轮请求都要重做一次。
+    if tools and not _mentions_tool_instructions(messages, system_text, TOOLCALL_HEADER):
         tool_text = format_tools_instruction(tools)
     # 新会话 / 重置后的第一轮：把格式强调再放一次（模型最容易在这时候无视工具）。
     emphasis = format_tool_call_emphasis(tools) if (tool_text and include_preamble) else ""
@@ -399,7 +413,17 @@ def build_prompt(
     history = [m for m in used_messages if m.role != "system"]
 
     # 从最新一条往前累加，直到预算用尽。
+    # 渲染结果按索引缓存：同一条消息不会因为「预算计算 + 复核」被渲染两次。
     rendered: List[str] = []
+    block_cache: dict = {}
+
+    def _block(index: int) -> str:
+        cached = block_cache.get(index)
+        if cached is None:
+            cached = _render_message(history[index])
+            block_cache[index] = cached
+        return cached
+
     used = 0
     truncated = False
     indexed = list(enumerate(history))
@@ -408,7 +432,7 @@ def build_prompt(
         default=(len(history) - 1 if history else -1),
     )
     for idx, message in reversed(indexed):
-        block = _render_message(message)
+        block = _block(idx)
         block_len = len(block) + 2
         is_last_user = idx == newest_user_index
         if not is_last_user and budget and (reserved + used + block_len) > budget:
@@ -420,7 +444,7 @@ def build_prompt(
 
     # 预算对「最新一条 user」不设上限，但若它自身就超过预算需在 notes 里说明。
     if newest_user_index >= 0:
-        newest_block_len = len(_render_message(history[newest_user_index])) + 2
+        newest_block_len = len(_block(newest_user_index)) + 2
         if budget and reserved + newest_block_len > budget:
             truncated = True
 

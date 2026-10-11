@@ -12,10 +12,13 @@ from claude_web import config
 
 @pytest.fixture(autouse=True)
 def fast_config(tmp_path, monkeypatch):
+    # 结束 / 停滞阈值都是**时长**（秒），测试里压缩到毫秒级即可（轮询间隔也只有 1ms）。
     monkeypatch.setattr(config, "POLL_INTERVAL_S", 0.001)
-    monkeypatch.setattr(config, "STABLE_POLLS", 1)
-    monkeypatch.setattr(config, "QUIET_POLLS", 1)
-    monkeypatch.setattr(config, "STALL_POLLS", 5)
+    monkeypatch.setattr(config, "POLL_INTERVAL_ACTIVE_S", 0.001)
+    monkeypatch.setattr(config, "SETTLE_S", 0.01)
+    monkeypatch.setattr(config, "SETTLE_NO_SIGNAL_S", 0.02)
+    monkeypatch.setattr(config, "SUBMIT_LOST_S", 0.01)
+    monkeypatch.setattr(config, "STALL_S", 0.05)
     monkeypatch.setattr(config, "RESPONSE_TIMEOUT_S", 5.0)
     monkeypatch.setattr(config, "RESPONSE_TIMEOUT_EXTEND_S", 0.0)
     monkeypatch.setattr(config, "FILL_RETRIES", 1)

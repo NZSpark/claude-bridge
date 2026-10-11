@@ -190,10 +190,22 @@ RESPONSE_TIMEOUT_EXTEND_S = env_float("RESPONSE_TIMEOUT_EXTEND_S", 300.0)
 #: 明确可安全重试的最大次数（默认保守）。
 MAX_UPSTREAM_RETRIES = env_int("CLAUDE_RETRIES", 1)
 RETRY_BACKOFF_S = env_float("RETRY_BACKOFF_S", 1.0)
+#: 页面**静止**（没有在生成、正文也没有增长）时的轮询间隔（秒）。
 POLL_INTERVAL_S = env_float("POLL_INTERVAL_S", 1.5)
-STABLE_POLLS = env_int("STABLE_POLLS", 4)
-STALL_POLLS = env_int("STALL_POLLS", 20)
-QUIET_POLLS = env_int("QUIET_POLLS", 4)
+#: 页面**活跃**（自述仍在生成 / 正文刚增长）时的轮询间隔（秒）。
+#:
+#: 只影响「多快看到页面上的变化」，不影响判定语义——结束 / 停滞阈值都是**时长**
+#: （见 SETTLE_S / STALL_S），因此放快轮询不会削弱任何保护。
+POLL_INTERVAL_ACTIVE_S = env_float("POLL_INTERVAL_ACTIVE_S", 0.4)
+#: 页面自述已结束（``data-is-streaming=false`` / 无停止控件）后，内容静默多久算完成。
+#: 这是「客户端等多久才拿到收尾」的主要项（时长，不随轮询间隔变化）。
+SETTLE_S = env_float("SETTLE_S", 2.5)
+#: 完全探不到生成信号（两路信号都拿不到）时的兜底静默时长，比 SETTLE_S 更保守。
+SETTLE_NO_SIGNAL_S = env_float("SETTLE_NO_SIGNAL_S", 6.0)
+#: 页面静止多久、且输入区里仍留着本轮提示词 → 判定「提交没生效」并快速失败。
+SUBMIT_LOST_S = env_float("SUBMIT_LOST_S", 6.0)
+#: 页面静止多久且正文无增长 → 判定停滞（快速失败，不再干等到绝对超时）。
+STALL_S = env_float("STALL_S", 30.0)
 
 
 # ==================== 8. 会话 ====================
@@ -299,6 +311,24 @@ CONTEXT_LIMIT_PATTERNS = env_list(
     "CONTEXT_LIMIT_PATTERNS",
     "context limit||conversation is too long||maximum length||"
     "对话长度上限||已达长度限制",
+)
+# 回复节点里要剔除的**页面外壳**（doc/design.md 4.4）。
+#
+# assistant 消息节点不只是模型正文，实测（2026-10-12 在真实页面逐节点核对）还包含：
+#   * ``sr-only`` 的无障碍标题，内容形如 ``Claude responded: <整段正文>``
+#     —— 不剔除就会让客户端看到「同一段正文出现两遍」；
+#   * 动作栏（Copy / Read aloud / 点赞 / 重试）；
+#   * 时间戳 ``<time>``（``just now`` / ``13 minutes ago``）；
+#   * 推广行（``Claude works directly with your codebase`` + Install 按钮）。
+#
+# 改版后若发现新的外壳混进正文，把选择器加进来即可（无需改代码）。
+REPLY_CHROME_SELECTORS = env_list(
+    "REPLY_CHROME_SELECTORS",
+    "script||style||noscript||template||time||button||[role=\"button\"]"
+    "||[role=\"toolbar\"]||[role=\"status\"]||[aria-hidden=\"true\"]||.sr-only"
+    "||[class*=\"sr-only\"]||[class*=\"visually-hidden\"]||[class*=\"screen-reader\"]"
+    "||[data-testid*=\"message-actions\"]||[data-testid*=\"action-bar\"]"
+    "||[data-testid*=\"growth\"]||[data-testid*=\"promo\"]||[data-testid*=\"upsell\"]",
 )
 
 

@@ -103,6 +103,8 @@ class FakePage:
         self.closed = False
         self.new_chat_opened = False
         self.goto_calls: List[str] = []
+        #: 最近一次 ``COMPLETE_TEXT_JS`` 的入参（用于断言外壳选择器确实传下去了）。
+        self.last_complete_text_args: Any = None
 
     # ---- Playwright 接口子集 ----
     def is_closed(self) -> bool:
@@ -157,7 +159,10 @@ class FakePage:
         if expression == selectors.BODY_TEXT_JS:
             return self.body_text
         if expression == selectors.COMPLETE_TEXT_JS:
-            return getattr(arg, "text", "")
+            # 真实调用形态是 ``{"node": node, "chrome": [...]}``；也容忍直接传节点。
+            node = arg.get("node") if isinstance(arg, dict) else arg
+            self.last_complete_text_args = arg
+            return getattr(node, "text", "")
         return None
 
     # ---- 内部 ----

@@ -11,16 +11,33 @@
 ``SELECTOR_VERSION`` 用于诊断——改版导致候选全部落空时，日志里能看出是哪一代选择器。
 """
 
-#: 选择器版本号：Claude 网页改版导致选择器失效时用于诊断。
-SELECTOR_VERSION = "2026-10-11"
+#: 选择器 / DOM 提取逻辑的版本号：Claude 网页改版导致选择器失效时用于诊断。
+SELECTOR_VERSION = "2026-10-12"
 
 # ---- JS 片段 ----
 
 # 读取回复节点完整文本：Claude 流式回复按 token 渲染动画，直接读 innerText 可能
 # 拿到未完成的片段。这里在克隆节点上移除动画类与相关样式，挂到屏幕外再读，
 # 既拿到完整文本，又保留块级换行。
+#
+# 同时剔除**页面外壳**（实测结构，2026-10-12，在真实页面上用 CDP 逐节点核对）：
+# assistant 消息节点里除了模型正文还有：
+#   * ``h2.sr-only[aria-hidden="true"]``：无障碍标题，内容形如
+#     ``Claude responded: <整段正文>`` —— 不剔除就会让客户端看到
+#     ``Claude responded: 收到。\n\n收到。``（「同一段正文出现两遍」的真实成因）；
+#   * ``div[role="toolbar"][data-testid="message-actions"]``：Copy / Read aloud /
+#     点赞 / 重试等按钮（图标无文本，但其内联文本与状态文本会漏进来）；
+#   * ``<time>13 minutes ago</time>`` / ``just now``：时间戳；
+#   * ``div[data-testid="growth-inline-line"]``：推广行
+#     （``Claude works directly with your codebase`` + Install 按钮）。
+#
+# 剔除列表由 `REPLY_CHROME_SELECTORS` 提供（改版时只改配置）：根节点始终是整个克隆节点，
+# 不用「正向选择正文容器」——那样在两轮之间根节点会切换，快照不再是前缀增长，流式会被
+# 判定为「内容被重写」而中断。
 COMPLETE_TEXT_JS = """
-    (node) => {
+    (opts) => {
+      const node = (opts && opts.node) || opts;
+      const chrome = (opts && opts.chrome) || [];
       const clone = node.cloneNode(true);
       clone.querySelectorAll('[class*="animate"], [class*="pending"], [class*="streaming"]')
         .forEach((e) => e.classList.remove('animate', 'pending', 'streaming'));
@@ -29,6 +46,9 @@ COMPLETE_TEXT_JS = """
         e.style.opacity = '1';
         e.style.visibility = 'visible';
       });
+      for (const selector of chrome) {
+        try { for (const el of clone.querySelectorAll(selector)) el.remove(); } catch (e) {}
+      }
       const holder = document.createElement('div');
       holder.style.position = 'absolute';
       holder.style.left = '-99999px';
@@ -157,11 +177,31 @@ PAGE_PROBE_JS = """
     }
     """
 
-# 读取整页可见文本长度（用于上下文到顶的粗筛；正文匹配在 Python 侧做）。
-BODY_TEXT_JS = "(selectors) => { let text = document.body ? (document.body.innerText || '') : '';" \
-    " for (const s of selectors) { try { for (const n of document.querySelectorAll(s)) {" \
-    " const t = n.innerText || ''; if (t) text = text.replace(t, ' '); } } catch (e) {} }" \
-    " return text; }"
+# 读取页面可见文本（用于上下文到顶的扫描；正文匹配在 Python 侧做）。
+#
+# 会话正文（助手 / 用户消息）必须剔除：用户的提问里完全可能出现「已达长度限制」这类
+# 字样，不剔除就会误报「会话到顶」。但逐节点做整串 replace 是 O(页面文本 × 节点数)，
+# 而绝大多数轮次里页面上根本没有这类提示——因此先做一次廉价的 includes 预判：
+# 没命中就直接返回空串（Python 侧据此判定为否），命中才做剔除。
+BODY_TEXT_JS = """
+    (opts) => {
+      const selectors = (opts && opts.selectors) || [];
+      const patterns = (opts && opts.patterns) || [];
+      let text = document.body ? (document.body.innerText || '') : '';
+      if (!text) return '';
+      const lowered = text.toLowerCase();
+      if (!patterns.some((p) => lowered.includes(p))) return '';
+      for (const s of selectors) {
+        try {
+          for (const n of document.querySelectorAll(s)) {
+            const t = n.innerText || '';
+            if (t) text = text.replace(t, ' ');
+          }
+        } catch (e) {}
+      }
+      return text;
+    }
+    """
 
 #: 「生成中」探测的硬编码兜底选择器（config 候选全落空时仍可用）。
 GENERATING_FALLBACK = 'button[aria-label*="Stop"], [data-is-streaming="true"]'

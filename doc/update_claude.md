@@ -1,6 +1,6 @@
 # ClaudeBridge 改进建议
 
-> 基于 2026-10-12 对仓库（提交 `4e3cdf1`）的静态阅读与测试结果。已阅读：`server.py`、`service.py`、`completion/generator.py`、`completion/lifecycle.py`、`driver.py`、`page_pool.py`、`tasks.py`、`session/store.py`、`session_store.py`、`config.py`（部分）、`pyproject.toml`、`.gitignore`、`doc/design.md`、`doc/tasks.md`。未逐行读完的模块（`toolcalls.py`、`prompting.py`、`dom_adapter.py`、`bridge_commands.py`）只在「待核实」中提及，不下结论。
+> 基于 2026-10-12 对仓库（初稿基于提交 `4e3cdf1`，5.2 节补充了 `c8719d3` 中一并提交的生成判定改动）的静态阅读与测试结果。已阅读：`server.py`、`service.py`、`completion/generator.py`、`completion/lifecycle.py`、`driver.py`、`page_pool.py`、`tasks.py`、`session/store.py`、`session_store.py`、`config.py`（部分）、`pyproject.toml`、`.gitignore`、`doc/design.md`、`doc/tasks.md`。未逐行读完的模块（`toolcalls.py`、`prompting.py`、`dom_adapter.py`、`bridge_commands.py`）只在「待核实」中提及，不下结论。
 
 ## 1. 现状概览
 
@@ -134,9 +134,9 @@
 ### D. 仍成立的结论
 `lifecycle._same_conversation` 的前缀比较问题（2.6）、`generator` 取消抛 `GenerationStalledError`（2.5）、`_fill` 的 `except BaseException`（3.4）本轮未发现已修复迹象，保持原优先级。
 
-## 6. 待核实（本次未读完，不下结论）
+## 5.2 第三轮补充：`c8719d3` 中一并提交的「提交未生效 / 多信号生成判定」改动\n\n验证：`pytest` 全部通过（e2e 默认跳过），`ruff check` 通过。本节只依据该提交的 diff，未逐行通读 `dom_adapter.py` 全文。\n\n### 做得好的地方\n- `end_detection.evaluate_poll` 的 `stalled` 不再受 `saw_generating` 闩锁影响，只看本轮观测，修复了「页面早已静止、客户端仍等到 `generation_timeout`」的问题；状态机仍是纯函数，便于单测。\n- 新增 `PromptSubmissionError` / `submit_lost` 快路径：页面空闲、无新回复、输入区仍留着本轮提示词时，空转满 `quiet_polls` 轮即失败。\n- 生成中判定改为「消息级 `data-is-streaming` + 控件级停止按钮」取并集；探测抛异常才记为未知。\n- 增加不含正文的 `[生成]` 收尾日志，排障时能直接看出结束原因、轮询次数与正文字符数。\n\n### 风险与建议\n- **误判窗口（P1）**：提交成功但站点清空输入区有延迟时，`composer_contains` 仍为真，可能在约 `quiet_polls × POLL_INTERVAL_S`（默认约 6 秒）后被判为提交未生效。建议触发快路径前再读一次输入区与回复计数确认，或把窗口放宽为可配置项。\n- **重试语义（P1）**：`PromptSubmissionError` 发生在提交之后，按 design.md 9.3 不得无条件重发。需要在文档里写明客户端是否可以安全重试，以及与「提交没生效」的区别是否对客户端可见。\n- **长时间思考的误报（P1）**：`stalled` 现在包含「页面空闲且正文无增长」，若长时间思考期间两路生成信号都探不到，约 `STALL_POLLS × POLL_INTERVAL_S`（默认约 30 秒）就会报 `generation_stalled`。建议核实消息级信号在思考阶段是否稳定为真，必要时让停滞窗口随「已见到正文 / 曾见生成中」放宽。\n- **指标缺口（P2）**：`service._record_failure` 只对 `generation_timeout` / `generation_stalled` 计 `request_timeout_total`，建议为 `prompt_submission_failed` 单独计数，便于观察站点改版或输入区选择器失效。\n- **每轮多一次 DOM 往返（P2）**：未见到回复前每轮都调用 `composer_contains`，可只在页面空闲时才检查。\n- **测试（P2）**：`end_detection` 与浏览器适配层已有新增用例；`generator.generate` 层面 `submit_lost` 路径的集成时序测试是否存在未核实，建议用 `tests/fakes.py` 补一条。\n- **流程（P2）**：这批改动被 `git add -A` 带入了只写「文档」的提交，提交信息与内容不符。建议以后按主题拆分提交。\n\n### 与前文结论的关系\n2.5（取消抛 `GenerationStalledError`）、3.4（`_fill` 的 `except BaseException`）在该提交后仍成立，优先级不变；2.6 中关于 `_same_conversation` 的结论也未受影响。\n\n## 6. 待核实（本次未读完，不下结论）
 
 - `toolcalls.py`（约 714 行）：围栏/无围栏两种解析形态的边界，如嵌套代码块、重复调用、参数类型强转。
 - `prompting.py`（约 473 行）：`CLAUDE_MAX_CONTEXT_CHARS` 超限时的截断策略是否会截掉最新的 tool 结果。
-- `browser/dom_adapter.py`：选择器回退命中后是否记录到 metrics，以及 `detect_context_limit` 的误报率。
+- `browser/dom_adapter.py`：选择器回退命中后是否记录到 metrics，以及 `detect_context_limit` 的误报率；`generating_state` / `composer_contains` 的实现细节只看过 diff，未通读。
 - `bridge_commands.py`：已在 5.1 核实（仅最后一条 user 消息触发；各协议共用同一入口）。

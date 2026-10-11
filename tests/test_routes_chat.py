@@ -176,7 +176,7 @@ def test_missing_composer_maps_to_502(build_client):
 def test_no_new_reply_maps_to_502(build_client, monkeypatch):
     from claude_web import config
 
-    monkeypatch.setattr(config, "STALL_POLLS", 2)
+    monkeypatch.setattr(config, "STALL_S", 0.005)
     client, _ = build_client(FakePage(snapshots=[], generating_plan=[False]))
     resp = _chat(client)
     assert resp.status_code == 502

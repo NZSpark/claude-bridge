@@ -210,6 +210,35 @@ def test_tools_instruction_not_duplicated_when_already_present():
     assert build.text.count(TOOLCALL_HEADER) == 1
 
 
+def test_build_prompt_renders_each_message_at_most_once(monkeypatch):
+    """回归：为「去重」而重渲染整段历史会把 20k 字符的工具结果也渲染一遍。
+
+    旧实现先 ``_render_message`` 全部非 system 消息、拼接成一个 ``inbound`` 字符串，
+    只为做一次子串判定，然后又渲染一遍历史做预算。这里断言每条消息至多渲染一次。
+    """
+    from claude_web import prompting
+
+    rendered: list = []
+    original = prompting._render_message
+
+    def spy(message):
+        rendered.append(message.role)
+        return original(message)
+
+    monkeypatch.setattr(prompting, "_render_message", spy)
+    tools = [ToolSpec(name="read_file", description="read", parameters={})]
+    messages = (
+        ("user", "旧请求"),
+        ("assistant", "旧回复"),
+        ("tool", "x" * 5000),
+        ("user", "本轮任务"),
+    )
+    build = build_prompt(normalize_messages(_msgs(*messages)), tools=tools)
+    assert build.text.count("[Tool Calling Instructions]") == 1
+    assert len(rendered) == len(messages)  # 每条消息恰好渲染一次
+    assert rendered.count("tool") == 1
+
+
 def test_seed_env_note_is_injected(monkeypatch):
     monkeypatch.setattr(config, "SEED_ENV_NOTE", "[环境说明] 项目就在本机。")
     build = build_prompt(normalize_messages(_msgs(("user", "hi"))))

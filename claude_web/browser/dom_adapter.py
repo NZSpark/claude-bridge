@@ -265,7 +265,14 @@ class ClaudeDOMAdapter(DiagnosticsMixin):
         if not patterns:
             return False
         try:
-            text = await page.evaluate(selectors.BODY_TEXT_JS, list(config.RESPONSE_SELECTORS))
+            # JS 侧先做一次廉价的文案预判（没命中直接返回空串），命中才剔除会话正文。
+            text = await page.evaluate(
+                selectors.BODY_TEXT_JS,
+                {
+                    "selectors": list(config.RESPONSE_SELECTORS),
+                    "patterns": patterns,
+                },
+            )
         except Exception:  # noqa: BLE001
             return False
         if not isinstance(text, str) or not text:
@@ -474,7 +481,12 @@ class ClaudeDOMAdapter(DiagnosticsMixin):
             raise ReplyExtractionError(f"回复索引越界：{index}") from exc
         text = ""
         try:
-            text = await page.evaluate(selectors.COMPLETE_TEXT_JS, node)
+            # 剔除页面外壳（无障碍标题 / 动作栏 / 时间戳 / 推广行）：只读整段 innerText
+            # 会把「Claude responded: <整段正文>」与 “just now” 一并读成正文。
+            text = await page.evaluate(
+                selectors.COMPLETE_TEXT_JS,
+                {"node": node, "chrome": list(config.REPLY_CHROME_SELECTORS)},
+            )
         except Exception:  # noqa: BLE001
             try:
                 text = await _maybe_await(node.inner_text())
