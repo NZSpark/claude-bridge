@@ -315,17 +315,44 @@ class PromptBuild:
     notes: List[str] = field(default_factory=list)
 
 
+def delta_messages(messages: Sequence[NormalizedMessage]) -> List[NormalizedMessage]:
+    """取「最后一条 assistant 消息之后」的新增消息（复用网页会话时只发这些）。
+
+    网页会话本身是持续存在的，历史已经在那边了；每轮重发完整历史既慢又会让
+    输入框被历史灌满（实测：一个多轮 Pi 任务每轮都在重放几千行）。
+
+    * 丢弃 ``system``：客户端每轮都会重发完整系统提示，网页会话早已带着它；
+    * 没有新消息时退回最后一条 user 消息（保证至少有可执行内容）。
+    """
+    last_assistant = -1
+    for index, message in enumerate(messages):
+        if message.role == "assistant":
+            last_assistant = index
+    delta = [m for m in messages[last_assistant + 1 :] if m.role != "system"]
+    if not delta:
+        delta = [m for m in messages if m.role == "user"][-1:]
+    return list(delta)
+
+
 def build_prompt(
     messages: Sequence[NormalizedMessage],
     *,
     tools: Optional[Sequence[ToolSpec]] = None,
-    include_preamble: bool = True,
+    seed: bool = True,
+    include_preamble: Optional[bool] = None,
+    include_system: Optional[bool] = None,
     extra_sections: Optional[Sequence[str]] = None,
 ) -> PromptBuild:
     """把归一化消息构建为网页输入框文本。
 
-    预算策略（doc/design.md 5.3）：先扣除 system 前缀与工具说明，再从最新往最旧
-    累加历史；**最后一条 user 消息永远完整保留**，即使因此超出预算（并在 notes 里标注）。
+    ``seed=True``（默认）：开新对话 / 重新播种时使用——重放完整历史，带上播种
+    头部、格式强调块与省略说明。
+
+    ``seed=False``：复用已有网页会话时使用——**只发 ``messages`` 里最后一条
+    assistant 之后的新增消息**，不带播种头部（那边已经有前因）。
+
+    预算策略（doc/design.md 5.3）：先扣除系统前缀与工具说明，再从最新往最旧累加
+    历史；**最后一条 user 消息永远完整保留**，即使因此超出预算（并在 notes 里标注）。
     """
     from .toolcalls import (
         TOOLCALL_HEADER,
@@ -334,6 +361,13 @@ def build_prompt(
         format_tools_instruction,
     )
 
+    if include_preamble is None:
+        include_preamble = seed
+    # 复用会话时默认不再重发系统提示（客户端每轮都会发同一份，网页会话早已带着它）；
+    # 调用方在系统提示**变了**时可以显式打开（见 SessionLifecycle.prepare）。
+    if include_system is None:
+        include_system = seed
+    used_messages = list(messages) if seed else delta_messages(messages)
     system_text = extract_system_text(messages)
     inbound = "\n".join(
         [system_text] + [_render_message(m) for m in messages if m.role != "system"]
@@ -353,7 +387,7 @@ def build_prompt(
         fixed_parts.append(emphasis)
     if include_preamble and config.SEED_ENV_NOTE:
         fixed_parts.append(config.SEED_ENV_NOTE)
-    if system_text:
+    if system_text and include_system:
         fixed_parts.append(_ROLE_MARKERS["system"] + "\n" + system_text)
     fixed = "\n\n".join(fixed_parts)
     trailer_parts: List[str] = list(extra_sections or [])
@@ -361,7 +395,8 @@ def build_prompt(
 
     # 工具说明现在插在正文**内部**（紧贴本轮任务），因此也要计入预留预算。
     reserved = len(fixed) + len(trailer) + len(tool_text) + 2
-    history = [m for m in messages if m.role != "system"]
+    # 播种 = 整段历史；复用会话 = 只取本轮新增（见 delta_messages）。
+    history = [m for m in used_messages if m.role != "system"]
 
     # 从最新一条往前累加，直到预算用尽。
     rendered: List[str] = []
@@ -397,11 +432,14 @@ def build_prompt(
     # 整段历史之前，也不是整段 prompt 的末尾——隔着上千行历史时模型倾向于直接凭
     # 知识作答；贴到任务前才有近因效应，同时仍满足「工具说明先于任务」的约定。
     if tool_text:
-        rendered.insert(max(0, len(rendered) - 1), tool_text)
+        # 播种路径贴在本轮任务前；增量路径直接放最前（那一段通常就只有一条新消息）。
+        position = max(0, len(rendered) - 1) if seed else 0
+        rendered.insert(position, tool_text)
     # 死循环防护：同一命令反复发出且每次都是空输出时，直接在末尾点名（近因效应）。
+    # 计数用完整 messages（重复可能发生在几轮之前），判定空输出只看本轮发送的内容。
     empty_call_ids = [
         m.tool_call_id
-        for m in messages
+        for m in used_messages
         if m.role == "tool" and _is_empty_tool_output(m.content or "")
     ]
     if empty_call_ids:

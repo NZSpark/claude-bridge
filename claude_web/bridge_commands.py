@@ -12,8 +12,9 @@
 * **本地应答**：命令由桥自己回答、**不发给 Claude 网页版**，所以页面失效、浏览器
   没起来（普通请求 503）时这些命令依然可用 —— 排障时最需要它们。
 * **不泄露**：回复只含状态摘要，不打印配置值、Cookie、令牌或其它桶的信息。
-* **不硬造能力**：本项目每一轮都播种完整历史（没有「只发增量」模式），也没有按桶
-  设置项，因此不提供 ``reseed`` / ``settings`` 命令，而是在这类输入上直接说明原因。
+* **不硬造能力**：本项目在**同一条网页会话里续写**（首轮开新对话 + 完整历史播种，
+  之后只发增量），没有按桶设置项，因此不提供 ``reseed`` / ``settings`` 命令，而是在
+  这类输入上直接说明该用什么命令。
 """
 
 from __future__ import annotations
@@ -308,10 +309,11 @@ async def _session_reply(command: BridgeCommand, service: Any, bucket: str) -> s
     if sub == "reseed":
         return "\n".join(
             [
-                "[Bridge] 不需要 reseed：本项目每一轮都会把客户端传来的完整历史",
-                "**整体播种**进网页会话（没有「只发增量」模式），所以历史始终是完整的。",
-                f" 想换一条全新网页会话：`{BRIDGE_COMMAND} session reset`。",
-                f" 想绑定到某条已有会话：`{BRIDGE_COMMAND} session link <URL>`。",
+                "[Bridge] 不需要单独的 reseed：本项目首轮就开新对话并**播种完整历史**，",
+                "之后在同一网页会话里**只发增量**，因此上下文默认一直是连贯的。",
+                f" 怀疑网页端上下文丢了 / 想强制重播一遍：`{BRIDGE_COMMAND} session reset`",
+                "  （下一轮换成一条新网页会话并重新播种完整历史）。",
+                f" 想固定在一条已有会话上：`{BRIDGE_COMMAND} session link <URL> --seed`。",
             ]
         )
     if sub == "reset":
@@ -370,7 +372,9 @@ async def _link_reply(command: BridgeCommand, service: Any, bucket: str) -> str:
     if command.seed:
         lines.append(" 已标记为「那条会话里没有此前记录」：下一轮把完整历史播种进去（网页端会出现一次重复）。")
     else:
-        lines.append(" 按「该会话里已有此前上下文」处理；注意本项目每轮仍会播种完整历史。")
+        lines.append(
+            " 按「该会话里已有此前上下文」处理：本轮会完整播种一次，之后只发增量。"
+        )
     lines.append(" 影响范围：只影响这个桶；页面重建 / 服务重启后仍会回到这条会话。")
     lines.append(f" 解除绑定：`{BRIDGE_COMMAND} unlink`。")
     return "\n".join(lines)
@@ -479,7 +483,7 @@ def _history_line(stats: dict) -> str:
     if stats.get("cap_hit"):
         return "上次到上下文上限（下一轮换新网页会话并播种历史）"
     if stats.get("has_history"):
-        return "已有上下文（本项目每轮仍播种完整历史）"
+        return "已有上下文（复用该网页会话，只发增量）"
     return "尚无历史（下一轮会把完整历史播种进去）"
 
 

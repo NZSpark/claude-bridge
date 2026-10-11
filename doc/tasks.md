@@ -20,7 +20,7 @@
 | 选择器 | [claude_web/browser/selectors.py](../claude_web/browser/selectors.py) | ⚠️ 候选，待真实探测 |
 | DOM 适配 | [claude_web/browser/dom_adapter.py](../claude_web/browser/dom_adapter.py) | ⚠️ 候选选择器 + 诊断 |
 | DOM 诊断 | [claude_web/browser/diagnostics.py](../claude_web/browser/diagnostics.py) | ✅ 只回布尔/计数 |
-| 会话生命周期 | [claude_web/completion/lifecycle.py](../claude_web/completion/lifecycle.py) | ✅ 新会话 + 完整播种 + 绑定 |
+| 会话生命周期 | [claude_web/completion/lifecycle.py](../claude_web/completion/lifecycle.py) | ✅ 复用网页会话 + 首轮完整播种 + 绑定 |
 | 生成协调 | [claude_web/completion/generator.py](../claude_web/completion/generator.py) | ✅ 结束判定 + 工具缓冲 |
 | 回复提取 | [claude_web/completion/extractor.py](../claude_web/completion/extractor.py) | ✅ 只取新增回复 |
 | 会话状态 | [claude_web/session/](../claude_web/session/) + [session_store.py](../claude_web/session_store.py) 门面 | ✅ 单一事实来源 |
@@ -41,7 +41,7 @@
 
 ### 阶段 B：OpenAI Chat Completions
 - ✅ 内部消息模型与请求校验（未知字段宽松接收）。
-- ✅ 提示词构建、完整历史播种、字符预算与裁剪标注。
+- ✅ 提示词构建、首轮完整播种、增量续写、字符预算与裁剪标注。
 - ✅ 非流式端点、`/v1/models`、标准错误对象。
 - ✅ SSE 合成流（首块 role、增量、结束块、`[DONE]`）。
 - ✅ `/healthz`、`/readiness`、`/metrics`。
@@ -64,8 +64,9 @@
 
 ## 关键决策
 
-1. **默认「新会话 + 完整历史播种」**：请求可重放、状态可恢复，不依赖客户端与网页
-   上一轮严格同步。增量复用现有网页会话留待后续阶段。
+1. **默认「复用网页会话 + 首轮完整播种」**：同一桶首轮开新对话并播种完整历史，
+   之后只发增量（输入短、延迟低、网页端不再堆重复对话）；页面被换掉 / 进程重启后
+   内存里的播种标记失效，自动回到完整播种，不依赖客户端与网页上一轮严格同步。
 2. **错题本式错误词汇表**：网页驱动层、会话层、API 层共用 `errors.ErrorCode`，
    HTTP 状态由 `http_status_for` 集中决定，避免各层各写一套。
 3. **提交后不无条件重发**：只在填充输入框（无副作用）阶段重试；提交后只做

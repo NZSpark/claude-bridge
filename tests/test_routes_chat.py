@@ -124,8 +124,12 @@ def test_authentication_failure_maps_to_503(build_client):
 
 
 def test_challenge_title_maps_to_503(build_client):
-    """Cloudflare 拦截页正文为空、选择器全不中，必须靠标题区分而不是误报改版。"""
-    client, _ = build_client(FakePage(title_text="Just a moment..."))
+    """Cloudflare 拦截页正文为空、选择器全不中，必须靠标题区分而不是误报改版。
+
+    真被挡住时输入区本来就不存在，所以这里刻意带上 ``composer_available=False``：
+    判定挑战页同时要求「命中文案」与「打不了字」（见 test_security_verification_* 上方注释）。
+    """
+    client, _ = build_client(FakePage(title_text="Just a moment...", composer_available=False))
     resp = _chat(client)
     assert resp.status_code == 503
     assert resp.json()["error"]["code"] == "challenge_required"
@@ -136,11 +140,30 @@ def test_security_verification_page_maps_to_503(build_client):
     page = FakePage(
         body_text="Performing security verification\nThis website uses a security service",
         title_text="claude.ai",
+        composer_available=False,
     )
     client, _ = build_client(page)
     resp = _chat(client)
     assert resp.status_code == 503
     assert resp.json()["error"]["code"] == "challenge_required"
+
+
+def test_usable_page_mentioning_verification_is_not_a_challenge(build_client):
+    """误报回归（用户侧原现象）：页面能用时，正文里的验证字样不能让请求变 503。
+
+    背景：一个讨论本项目的会话，正文整段引用了 "performing security verification"，
+    旧实现据此对每个请求都报 challenge_required，而用户在同一页面上对话完全正常。
+    """
+    page = FakePage(
+        snapshots=["Hello there!"],
+        title_text="Project analysis - Claude",
+        conversation_text='# ok:true 且 composer:true 才算可用。\n# challenged:true 表示命中了站点安全校验（如 "performing security verification"）',
+        composer_available=True,
+    )
+    client, _ = build_client(page)
+    resp = _chat(client)
+    assert resp.status_code == 200
+    assert resp.json()["choices"][0]["message"]["content"] == "Hello there!"
 
 
 def test_missing_composer_maps_to_502(build_client):

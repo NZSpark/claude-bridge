@@ -48,6 +48,8 @@ class DiagnosticsMixin:
                     "input": list(config_module.INPUT_SELECTORS),
                     "auth": list(config_module.AUTH_INDICATORS),
                     "challenge": list(config_module.CHALLENGE_INDICATORS),
+                    "challenge_text": list(config_module.CHALLENGE_TEXT_PATTERNS),
+                    "exclude": config_module.challenge_exclude_selectors(),
                 },
             )
             if isinstance(info, dict):

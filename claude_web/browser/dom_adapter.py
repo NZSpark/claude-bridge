@@ -50,8 +50,16 @@ class PageStatus:
     composer: bool = False
     #: 定位输入区时的命中明细（诊断用，逐条选择器的命中数）。
     composer_hits: List[str] = field(default_factory=list)
-    #: 判定为挑战页的依据（``title`` / ``selector`` / ``password``），便于诊断。
+    #: 判定为挑战页的依据（``title`` / ``selector`` / ``text``），便于诊断。
     challenge_reason: Optional[str] = None
+    #: 命中的具体证据：**配置里的**文案特征或选择器名（不含页面正文，可安全进日志）。
+    challenge_evidence: Optional[str] = None
+    #: 命中了挑战特征、但输入区可用：只作诊断提示，**不**当作挑战页报错。
+    #:
+    #: 这是为了修掉一个真实误报：一个（正常的）会话正文里引用了
+    #: "performing security verification"，旧实现就每轮都报 challenge_required，
+    #: 而用户明明能在同一个页面上正常对话。
+    challenge_suspect: bool = False
 
     @property
     def usable(self) -> bool:
@@ -113,28 +121,49 @@ class ClaudeDOMAdapter(DiagnosticsMixin):
                     "auth": list(config.AUTH_INDICATORS),
                     "challenge": list(config.CHALLENGE_INDICATORS),
                     "challenge_text": list(config.CHALLENGE_TEXT_PATTERNS),
+                    # 扫描挑战文案时要剔除的子树：会话正文（助手回复 / 用户消息 /
+                    # 会话列表）不是「站点在拦你」的证据，见 selectors.PAGE_PROBE_JS 注释。
+                    "exclude": config.challenge_exclude_selectors(),
                 },
             )
         except Exception as exc:  # noqa: BLE001
             logger.debug("[DOM] 页面状态探测失败：%s", type(exc).__name__)
             info = {}
+        raw_hit = False
         if isinstance(info, dict):
             status.url = str(info.get("url") or status.url)
             status.ready = str(info.get("ready") or "")
             patterns = [str(p).lower() for p in config.CHALLENGE_TEXT_PATTERNS if str(p).strip()]
-            title_hit = any(pattern in str(info.get("title") or "").lower() for pattern in patterns)
-            text_hit = bool(info.get("challenge_text"))
+            title = str(info.get("title") or "").lower()
+            title_pattern = next((p for p in patterns if p and p in title), None)
             selector_hit = bool(info.get("challenge"))
-            status.challenged = selector_hit or title_hit or text_hit
-            status.challenge_reason = (
-                "selector" if selector_hit else "title" if title_hit else "text" if text_hit else None
-            )
+            text_hit = bool(info.get("challenge_text"))
+            raw_hit = selector_hit or bool(title_pattern) or text_hit
+            if selector_hit:
+                status.challenge_reason = "selector"
+                status.challenge_evidence = "|".join(
+                    str(s) for s in config.CHALLENGE_INDICATORS
+                )[:120]
+            elif title_pattern:
+                status.challenge_reason = "title"
+                status.challenge_evidence = title_pattern
+            elif text_hit:
+                status.challenge_reason = "text"
+                # 只报**命中的配置文案**，不倒页面正文（可能是用户会话内容）。
+                hit_pattern = str(info.get("challenge_text_pattern") or "")
+                status.challenge_evidence = hit_pattern if hit_pattern in patterns else None
             status.authenticated = not bool(info.get("auth")) and not bool(info.get("password"))
             status.composer = bool(info.get("composer"))
         _, hits = await self._find_visible(page, config.INPUT_SELECTORS)
         status.composer_hits = hits
         if not status.composer:
             status.composer = any(entry.endswith(":1") or not entry.endswith(":0") for entry in hits)
+        # 判定顺序很重要：**能打字就说明页面没被挡住**。输入区可用时，即使命中了挑战特征
+        # （会话正文提到验证字样、隐藏的 Turnstile iframe 等），也只记一条诊断提示，
+        # 不报 challenge_required —— 否则一次误报会让所有请求直接失败（实测事故见
+        # doc/cloudfare.md 3.4）。真的被挡住（校验页）时输入区本来就不存在。
+        status.challenged = raw_hit and not status.composer
+        status.challenge_suspect = raw_hit and status.composer
         return status
 
     async def ensure_usable(self, page: Any) -> PageStatus:
@@ -143,7 +172,12 @@ class ClaudeDOMAdapter(DiagnosticsMixin):
         if status.challenged:
             raise ChallengeRequiredError(
                 "检测到站点安全挑战，请在普通浏览器中完成验证后重试",
-                detail={"reason": status.challenge_reason, "title_length_ok": True},
+                detail={
+                    "reason": status.challenge_reason,
+                    "evidence": status.challenge_evidence,
+                    "composer": status.composer,
+                    "composer_hits": status.composer_hits,
+                },
             )
         if not status.authenticated:
             raise AuthenticationRequiredError(

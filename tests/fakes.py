@@ -59,6 +59,8 @@ class FakePage:
         snapshots: Optional[List[str]] = None,
         generating_plan: Optional[List[bool]] = None,
         body_text: str = "",
+        conversation_text: str = "",
+        challenge_indicator: bool = False,
         authenticated: bool = True,
         composer_available: bool = True,
         url: str = "https://claude.ai/new",
@@ -66,7 +68,12 @@ class FakePage:
     ) -> None:
         self.snapshots = snapshots if snapshots is not None else ["Hello from Claude"]
         self.generating_plan = generating_plan if generating_plan is not None else [False]
+        #: 页面**自身**的文本（会被挑战文案扫描）。
         self.body_text = body_text
+        #: 会话正文 / 输入区文本：探针会把它剔除，不属于「站点在拦你」的证据。
+        self.conversation_text = conversation_text
+        #: 是否有**可见**的挑战页节点命中（隐藏的 Turnstile iframe 不算）。
+        self.challenge_indicator = challenge_indicator
         self.authenticated = authenticated
         self.composer_available = composer_available
         self.url = url
@@ -104,15 +111,19 @@ class FakePage:
     async def evaluate(self, expression: str, arg: Any = None) -> Any:
         if expression == selectors.PAGE_PROBE_JS:
             words = (arg or {}).get("challenge_text") or []
+            # 真实探针只扫描**剔除了会话正文与输入区**之后的页面文本；
+            # 这里用 body_text 表示那部分，conversation_text 不参与扫描。
             body = self.body_text.lower()
+            matched = next((str(w).lower() for w in words if str(w).lower() in body), "")
             return {
                 "url": self.url,
                 "ready": "complete",
                 "title": self.title_text,
                 "composer": self.composer_available,
                 "auth": not self.authenticated,
-                "challenge": False,
-                "challenge_text": any(str(w).lower() in body for w in words),
+                "challenge": self.challenge_indicator,
+                "challenge_text": bool(matched),
+                "challenge_text_pattern": matched,
                 "body_text_len": len(self.body_text),
                 "password": not self.authenticated,
             }

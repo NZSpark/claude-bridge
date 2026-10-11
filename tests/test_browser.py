@@ -8,9 +8,12 @@ from __future__ import annotations
 
 import asyncio
 
+import pytest
+
 from claude_web import config
 from claude_web.browser.dom_adapter import ClaudeDOMAdapter
 from claude_web.driver import browser_launch_args
+from claude_web.errors import ChallengeRequiredError
 from tests.fakes import FakeElement, FakeKeyboard, FakePage
 
 
@@ -96,9 +99,11 @@ def _status(page: FakePage):
 
 
 def test_challenge_detected_by_title():
+    # 真被挡住时输入区不存在；判定同时要求「命中文案」与「打不了字」。
     status = _status(FakePage(title_text="Just a moment...", composer_available=False))
     assert status.challenged is True
     assert status.challenge_reason == "title"
+    assert status.challenge_evidence == "just a moment"
 
 
 def test_challenge_detected_by_body_text():
@@ -106,10 +111,12 @@ def test_challenge_detected_by_body_text():
     page = FakePage(
         title_text="claude.ai",
         body_text="Performing security verification\nVerifying you are not a bot",
+        composer_available=False,
     )
     status = _status(page)
     assert status.challenged is True
     assert status.challenge_reason == "text"
+    assert status.challenge_evidence == "performing security verification"
 
 
 def test_normal_page_is_not_flagged_as_challenge():
@@ -118,6 +125,60 @@ def test_normal_page_is_not_flagged_as_challenge():
     assert status.challenge_reason is None
     assert status.composer is True
     assert status.usable is True
+
+
+# ---- 误报回归：页面能用时不能被判成挑战页 ----
+#
+# 事故现象：用户能在网页里正常对话，bridge 却对每个请求报
+# 「检测到站点安全挑战，请在普通浏览器中完成验证后重试」。
+
+
+PHRASE = "performing security verification"
+
+
+def test_conversation_text_never_counts_as_challenge():
+    """会话正文（回复 / 用户消息）里的验证字样不是「站点在拦你」的证据。"""
+    page = FakePage(conversation_text=f'# {PHRASE}\n请在普通浏览器里完成验证')
+    status = _status(page)
+    assert status.challenged is False
+    assert status.challenge_reason is None
+    assert status.challenge_suspect is False
+
+
+def test_usable_page_with_challenge_phrase_is_only_a_suspect():
+    """能打字就不算被挡住：命中文案只记诊断提示，不报 challenge_required。"""
+    page = FakePage(body_text=f"{PHRASE} support article", composer_available=True)
+    status = _status(page)
+    assert status.challenged is False
+    assert status.challenge_suspect is True
+    assert status.challenge_reason == "text"
+    assert status.usable is True
+    # 关键：整条链路不再抛异常（此前就是这个误报把正常页面打成失败）。
+    asyncio.run(ClaudeDOMAdapter().ensure_usable(page))
+
+
+def test_hidden_challenge_selector_does_not_block_usable_page():
+    """隐藏的 Turnstile iframe / cf-challenge 容器不能把正常页面判成挑战页。"""
+    page = FakePage(challenge_indicator=False, composer_available=True)
+    assert _status(page).challenged is False
+    # 反过来：可见命中 + 没有输入区 = 真的是挑战页
+    blocked = FakePage(challenge_indicator=True, composer_available=False)
+    status = _status(blocked)
+    assert status.challenged is True
+    assert status.challenge_reason == "selector"
+    with pytest.raises(ChallengeRequiredError):
+        asyncio.run(ClaudeDOMAdapter().ensure_usable(blocked))
+
+
+def test_challenge_error_detail_carries_evidence():
+    """错误详情要能告诉用户「凭什么判定」：线索 + 输入区命中情况。"""
+    page = FakePage(title_text="Attention Required!", composer_available=False)
+    with pytest.raises(ChallengeRequiredError) as excinfo:
+        asyncio.run(ClaudeDOMAdapter().ensure_usable(page))
+    detail = excinfo.value.detail
+    assert detail["reason"] == "title"
+    assert detail["evidence"] == "attention required"
+    assert detail["composer"] is False
 
 
 # ---- 输入区写入与读回校验（真实站点是 tiptap / ProseMirror）----

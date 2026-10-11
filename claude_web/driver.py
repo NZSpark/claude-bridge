@@ -358,9 +358,20 @@ class ClaudeWebDriver:
         report.authenticated = status.authenticated and not status.challenged
         report.composer = status.composer
         report.url = status.url
+        if status.challenge_suspect:
+            # 命中了挑战特征但页面能用：只如实上报为诊断信息，不让它变成 503。
+            report.detail["challenge_suspect"] = {
+                "reason": status.challenge_reason,
+                "evidence": status.challenge_evidence,
+            }
         if status.challenged:
             report.error = "检测到站点安全挑战"
             report.error_code = ErrorCode.CHALLENGE_REQUIRED.value
+            report.detail["challenge"] = {
+                "reason": status.challenge_reason,
+                "evidence": status.challenge_evidence,
+                "composer_hits": status.composer_hits,
+            }
         elif not status.authenticated:
             report.error = "尚未登录 Claude 网页"
             report.error_code = ErrorCode.AUTHENTICATION_REQUIRED.value

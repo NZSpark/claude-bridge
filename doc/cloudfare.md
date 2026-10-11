@@ -63,16 +63,17 @@ report["ok"] = bool(
 
 - `claude_web/browser/selectors.py`：`PAGE_PROBE_JS`、`SELECTOR_VERSION`。
 - `claude_web/browser/dom_adapter.py`：`ClaudeDOMAdapter.page_status()`、`ensure_usable()`。
-- `claude_web/config.py`：`CHALLENGE_INDICATORS`、`CHALLENGE_TEXT_PATTERNS`。
+- `claude_web/config.py`：`CHALLENGE_INDICATORS`、`CHALLENGE_TEXT_PATTERNS`、
+  `CHALLENGE_EXCLUDE_SELECTORS`、`challenge_exclude_selectors()`。
 - `tests/e2e/probe.py`：等待、重新探测和报告逻辑。
 
 ### 3.1 不要只依赖挑战页选择器
 
 Cloudflare / Turnstile 的安全验证页面可能没有常见的挑战 iframe 或特定 CSS 类，标题也未必包含明显的验证字样。因此项目同时检查：
 
-- 挑战页候选选择器；
+- 挑战页候选选择器（要求**可见**命中）；
 - 页面标题中的挑战文案；
-- 页面可见文本中的挑战文案。
+- 页面**自身**文本中的挑战文案（不包含会话正文与输入区，见 3.4）。
 
 文案候选集中在 `CHALLENGE_TEXT_PATTERNS`，例如 `performing security verification`、`security verification`、`verify you are human`、`checking your browser`、`just a moment` 和 `attention required`，还包括现有中文候选。
 
@@ -94,6 +95,41 @@ Cloudflare / Turnstile 的安全验证页面可能没有常见的挑战 iframe �
 脚本支持 `--wait-human`。页面尚不可用时，可在有头浏览器窗口中由用户本人完成站点要求的验证或登录，脚本定期重新探测状态。
 
 该机制只等待人工操作，不自动点击验证框、不绕过安全挑战、不代填账号或密码。若验证没有完成，探测应返回失败状态，并根据报告继续诊断。
+
+### 3.4 反向误报：正常会话被当成挑战页（已修）
+
+**现象：** 用户在网页里对话完全正常，bridge 却对**每个**请求返回
+`Error: 检测到站点安全挑战，请在普通浏览器中完成验证后重试`。
+
+**根因（真实页面实测）：** 探针扫的是整页 `document.body.innerText`，而排除清单里
+只有助手回复节点。用户这条会话的内容本身就在讨论本项目，正文里整段引用了
+`"performing security verification"`（出现在**用户消息** `div[data-testid="user-message"]`
+里）—— 于是每一次 `ensure_usable()` 都命中 `CHALLENGE_TEXT_PATTERNS`，任务在提交前就被
+判成 `challenge_required`。实测同一页面：整页扫描 `challenge_text: true`，剔除会话
+内容后 `challenge_text: false`（扫描文本从 56077 字符降到 615 字符）。
+
+**修正后的判定规则（三条同时生效）：**
+
+1. **文案只在「页面自身」的文本里找**：`PAGE_PROBE_JS` 会剔除
+   `CHALLENGE_EXCLUDE_SELECTORS`（助手回复 / 用户消息 / 消息容器 / 会话链接）以及
+   输入区、`script` / `style`，只扫剩下的页面 chrome（见 `claude_web/browser/selectors.py`）。
+2. **选择器命中必须是可见的**：Turnstile 的 iframe 标题本就含 "challenge"
+   （`Widget containing a Cloudflare security challenge`），隐藏时不代表页面被挡住。
+3. **能打字就不算被挡住**：`challenged = 命中 and 输入区不可用`。命中但输入区可用时
+   只记 `PageStatus.challenge_suspect`（进 `/readiness` 的 `detail` 与
+   `/debug/dom`），**不**让请求失败；真的被挡住时输入区本来就不存在。
+
+错误详情也改成可核对的证据：`reason`（`title` / `text` / `selector`）、`evidence`
+（命中的**配置文案或选择器**，不含页面正文）、`composer` / `composer_hits`。旧实现
+在详情里塞的 `title_length_ok: true` 属于无常信息，已移除。
+
+**回归测试：** `tests/test_browser.py`（会话正文里的验证字样不计入、可用页面只记
+suspect、隐藏选择器不阻断、错误详情带证据）、`tests/test_routes_chat.py`（可用页面
+提到验证字样必须返回 200，而不是 503）。
+
+**如果还有误报或漏报：**误报优先往 `CHALLENGE_EXCLUDE_SELECTORS` 加容器；漏报
+（真挑战页没认出来）先看 `page_probe.challenge_text_pattern` 与 `body_text_len`，
+确认文案确实出现在页面 chrome 里，再加 `CHALLENGE_TEXT_PATTERNS` 候选。
 
 ## 4. 复用现有 Chrome 登录状态时的注意事项
 
@@ -137,6 +173,8 @@ CDP 模式可能连接到用户正在使用的 Chrome，因此探测脚本采用
 - `navigation_ok`：导航响应是否满足 HTTP 状态判定；
 - `final_url_host`、`final_url_path_segments`：最终落点摘要；
 - `authenticated`、`challenged`、`challenge_reason`：登录和挑战状态；
+- `page_probe.challenge_text` / `challenge_text_pattern` / `body_text_len`：文案信号是否命中、
+  命中的是哪条配置文案、剔除会话内容后还剩多少字符（用于区分“真拦住”与“会话里提到”）；
 - `composer`、`composer_hits`：输入区是否命中；
 - `selector_healthy`、`selector_detail`：各组候选的命中情况；
 - `page_unusable_reason`：页面是否已关闭或无响应；

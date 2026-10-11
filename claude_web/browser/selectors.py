@@ -78,17 +78,48 @@ PAGE_PROBE_JS = """
     (opts) => {
       const count = (s) => { try { return document.querySelectorAll(s).length; } catch (e) { return -1; } };
       const any = (list) => list.some((s) => count(s) > 0);
-      const bodyText = ((document.body && document.body.innerText) || '').toLowerCase();
-      const words = (opts.challenge_text || []).map((w) => String(w).toLowerCase());
+      // 选择器命中必须是**可见**的：Cloudflare Turnstile 的 iframe 标题就含 "challenge"
+      // （"Widget containing a Cloudflare security challenge"），但它常常是隐藏的、不代表
+      // 页面被挡住。旧实现只数节点，于是把正常页面误判成挑战页。
+      const visibleAny = (list) => list.some((s) => {
+        try {
+          for (const n of document.querySelectorAll(s)) {
+            const rects = n.getClientRects ? n.getClientRects() : null;
+            if (rects && rects.length) return true;
+          }
+        } catch (e) {}
+        return false;
+      });
+      // 挑战文案只认「页面自身」的文本：会话正文（助手回复 / 用户消息 / 代码块）与输入区里的
+      // 同名字符串属于历史内容，不能当作安全校验页的证据。实测一个讨论本项目的会话正文里
+      // 整段引用了 "performing security verification"，旧实现在这种页面上每轮都误报
+      // challenge_required，而页面其实完全可用（见 doc/cloudfare.md 3.4）。
+      const pageText = () => {
+        const clone = document.body ? document.body.cloneNode(true) : null;
+        if (!clone) return '';
+        const drop = ['script', 'style', 'noscript', 'template',
+                      '[contenteditable="true"]', 'textarea'].concat(opts.exclude || []);
+        for (const s of drop) {
+          try { for (const n of clone.querySelectorAll(s)) n.remove(); } catch (e) {}
+        }
+        // 克隆节点不在渲染树里，innerText 退化为 textContent；上面的 script/style 已移除，
+        // 剩下的就是页面自身可见文本（不包含会话正文与输入区）。
+        return String(clone.innerText || clone.textContent || '').toLowerCase();
+      };
+      const text = pageText();
+      const words = (opts.challenge_text || []).map((w) => String(w).toLowerCase()).filter((w) => w);
+      const textPattern = words.find((w) => text.includes(w)) || '';
       return {
         url: location.href,
         ready: document.readyState,
         title: document.title || '',
         composer: any(opts.input),
         auth: any(opts.auth),
-        challenge: any(opts.challenge),
-        challenge_text: words.some((w) => bodyText.includes(w)),
-        body_text_len: bodyText.length,
+        challenge: visibleAny(opts.challenge),
+        challenge_text: !!textPattern,
+        // 命中的**配置文案**（不是页面正文），用于诊断与错误详情。
+        challenge_text_pattern: textPattern,
+        body_text_len: text.length,
         password: count('input[type="password"]') > 0,
       };
     }

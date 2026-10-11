@@ -152,12 +152,16 @@ def test_reset_drops_binding_and_reports_scope(tmp_path):
     assert service.lifecycle.status(BUCKET)["linked_url"] is None
 
 
-def test_reseed_explains_that_seeding_is_always_full(tmp_path):
+def test_reseed_explains_reuse_and_points_at_reset(tmp_path):
+    """`reseed` 是解释型命令：首轮完整播种、之后只发增量，要重播就用 session reset。"""
     import asyncio
 
     service = _service(FakePage(), tmp_path)
     reply = asyncio.run(handle_command([{"role": "user", "content": "/bridge session reseed"}], service, BUCKET))
-    assert reply is not None and "不需要 reseed" in reply
+    assert reply is not None
+    assert "不需要单独的 reseed" in reply
+    assert "只发增量" in reply
+    assert "session reset" in reply
 
 
 # ==================== 路由拦截 ====================

@@ -113,12 +113,12 @@ HOME_URL = CLAUDE_WEBSITE
 LINK_ALLOWED_HOSTS = env_list("LINK_ALLOWED_HOSTS", "claude.ai")
 
 #: 缺省初始会话链接：设置后，**默认会话桶**在未单独绑定时直接进入这条会话，
-#: 而不是每次新开对话。
+#: 而不是让桥自己新建一条（桥自建时会复用同一条）。
 #:
-#: 只作用于默认桶是刻意为之：其他桶仍各自新建对话，避免多个桶共用一条网页会话
-#: 而互相串线（doc/design.md 5.1「同一会话桶的页面状态由唯一任务顺序控制」）。
+#: 只作用于默认桶是刻意为之：其他桶仍在**各自**的网页会话里续写，避免多个桶共用
+#: 一条网页会话而互相串线（doc/design.md 5.1「同一会话桶的页面状态由唯一任务顺序控制」）。
 #: 需要让某个非默认桶也固定在一条会话上，用 POST /session/link 单独绑定。
-#: 非法值（非 HTTPS / 非允许主机 / 非会话路径）会被忽略并打告警，回落到新开对话。
+#: 非法值（非 HTTPS / 非允许主机 / 非会话路径）会被忽略并打告警，回落到桥自建会话。
 DEFAULT_LINK_URL = env_str("CLAUDE_DEFAULT_LINK_URL", "").strip()
 
 
@@ -282,11 +282,38 @@ CHALLENGE_TEXT_PATTERNS = env_list(
     "checking your browser||just a moment||attention required||"
     "请稍候||安全验证",
 )
+# 扫描挑战文案时要**剔除**的子树：命中这些容器里的文本属于历史内容（会话正文、
+# 消息列表、会话链接），不是「站点在拦你」的证据。
+#
+# 事故背景（doc/cloudfare.md 3.4）：一个引用本项目 README 的会话，正文整段引用了
+# "performing security verification"，而旧实现扫的是整页 innerText、且只排除助手回复
+# 节点，于是对**每个**请求都误报 challenge_required —— 用户明明在同一页面上对话正常。
+CHALLENGE_EXCLUDE_SELECTORS = env_list(
+    "CHALLENGE_EXCLUDE_SELECTORS",
+    'div[data-testid="assistant-message"]||div[data-testid="user-message"]'
+    "||[data-message-author-role]||div.cds-user-message-body||div.font-claude-message"
+    '||div[class*="font-claude-message"]||[data-testid="conversation-turn"]'
+    '||[data-testid="chat-message"]||a[href*="/chat/"]',
+)
 CONTEXT_LIMIT_PATTERNS = env_list(
     "CONTEXT_LIMIT_PATTERNS",
     "context limit||conversation is too long||maximum length||"
     "对话长度上限||已达长度限制",
 )
+
+
+def challenge_exclude_selectors() -> list:
+    """挑战文案扫描要剔除的子树（去重、保序）。
+
+    两套配置都尊重：``CHALLENGE_EXCLUDE_SELECTORS`` 覆盖用户消息 / 会话列表，
+    ``RESPONSE_SELECTORS`` 可能被部署方改过，因此取并集而不是二选一。
+    """
+    merged: list = []
+    for selector in [*CHALLENGE_EXCLUDE_SELECTORS, *RESPONSE_SELECTORS]:
+        text = str(selector).strip()
+        if text and text not in merged:
+            merged.append(text)
+    return merged
 
 
 # ==================== 13. 日志 ====================
