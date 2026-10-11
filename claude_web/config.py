@@ -336,6 +336,37 @@ REPLY_CHROME_SELECTORS = env_list(
     "||[data-testid*=\"growth\"]||[data-testid*=\"promo\"]||[data-testid*=\"upsell\"]",
 )
 
+# ---- 额度用尽 / 升级弹窗（doc/design.md 4.3）----
+#
+# 额度用尽后 claude.ai 会弹出「Upgrade to keep chatting / You hit your 5-hour message
+# limit」这类 ``role="dialog"`` 弹窗。它盖住输入区、抢走焦点，于是填充看似成功而 Enter
+# 不生效，或者回复迟迟不来——桥接会误报「提交未生效 / 生成停滞」。这个开关让适配器在
+# 提交前把这类弹窗关掉（只点关闭 / 先不用类控件，绝不点升级或付费按钮）。
+MODAL_DISMISS_ENABLED = env_bool("MODAL_DISMISS_ENABLED", True)
+#: 弹窗容器候选选择器。
+MODAL_CONTAINER_SELECTORS = env_list(
+    "MODAL_CONTAINER_SELECTORS",
+    '[role="dialog"]||[aria-modal="true"]||[data-testid*="modal"]||[data-testid*="dialog"]',
+)
+#: 弹窗内「关闭」类控件的候选选择器（优先级最高）。
+MODAL_CLOSE_SELECTORS = env_list(
+    "MODAL_CLOSE_SELECTORS",
+    'button[aria-label="Close"]||button[aria-label*="close"]||button[aria-label*="dismiss"]'
+    '||button[data-testid*="close"]||button[data-testid*="dismiss"]',
+)
+#: 关闭控件的文案特征（小写子串）；用于「先不用 / 稍后再说」这类没有 aria-label 的按钮。
+#: ⚠️ 只放「不花钱就能关掉」的措辞：升级 / 购买 / 订阅类按钮绝不能被它匹配到。
+MODAL_CLOSE_TEXT_PATTERNS = env_list(
+    "MODAL_CLOSE_TEXT_PATTERNS",
+    "not now||maybe later||no thanks||dismiss||close||稍后||以后再说||暂不||先不用||关闭",
+)
+#: 命中这些文案（小写子串）的可见弹窗才算「额度用尽 / 升级」弹窗。
+MODAL_TEXT_PATTERNS = env_list(
+    "MODAL_TEXT_PATTERNS",
+    "message limit||usage limit||limit resets||resets at||upgrade to keep||"
+    "upgrade for higher limits||额度||已达到上限||升级套餐",
+)
+
 
 def conversation_exclude_selectors() -> list:
     """**会话内容**子树（助手回复、用户消息、会话列表等）——不是页面自身文案的证据。

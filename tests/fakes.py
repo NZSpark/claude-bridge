@@ -16,11 +16,18 @@ from claude_web.page_pool import PagePool
 
 
 class FakeElement:
-    def __init__(self, text: str = "", visible: bool = True, on_fill: Optional[Callable[[str], None]] = None) -> None:
+    def __init__(
+        self,
+        text: str = "",
+        visible: bool = True,
+        on_fill: Optional[Callable[[str], None]] = None,
+        on_click: Optional[Callable[[], None]] = None,
+    ) -> None:
         self.text = text
         self.visible = visible
         self.clicks = 0
         self._on_fill = on_fill
+        self._on_click = on_click
 
     async def is_visible(self) -> bool:
         return self.visible
@@ -35,6 +42,8 @@ class FakeElement:
 
     async def click(self) -> None:
         self.clicks += 1
+        if self._on_click is not None:
+            self._on_click()
 
 
 class FakeKeyboard:
@@ -42,6 +51,12 @@ class FakeKeyboard:
         self.page = page
 
     async def press(self, key: str) -> None:
+        if key == "Escape":
+            # 真实页面上 Escape 可以关掉弹窗（关闭按钮点不到时的退化路径）。
+            if self.page.modal_visible() and self.page.modal_escape_dismisses:
+                self.page.modal_escape_presses += 1
+                self.page.modal_dismissed = True
+            return
         if key != "Enter":
             return
         # 真实页面上 Enter 提交成功后输入区会被清空（桥的「提交到底有没有生效」判断
@@ -79,6 +94,10 @@ class FakePage:
         title_text: str = "Claude",
         user_messages: Optional[List[str]] = None,
         flat_reply_rows: Optional[int] = None,
+        limit_modal: Optional[str] = None,
+        modal_closable: bool = True,
+        modal_click_works: bool = True,
+        modal_escape_dismisses: bool = True,
     ) -> None:
         self.snapshots = snapshots if snapshots is not None else ["Hello from Claude"]
         self.generating_plan = generating_plan if generating_plan is not None else [False]
@@ -113,6 +132,25 @@ class FakePage:
         #: assistant 节点条数**恒定**为该值（复现 2026-10-12 的 ``reply_not_found``：
         #: 页面上明明已经有回复，条数却始终等于基线）。
         self.flat_reply_rows = flat_reply_rows
+        #: 页面上的「额度用尽 / 升级」弹窗文案（``None`` = 没有弹窗）。
+        self.limit_modal = limit_modal
+        #: 弹窗里是否有可点的关闭控件 / 点击是否真的关得掉 / Escape 能不能关掉。
+        self.modal_closable = modal_closable
+        self.modal_click_works = modal_click_works
+        self.modal_escape_dismisses = modal_escape_dismisses
+        self.modal_dismissed = False
+        self.modal_clicks = 0
+        self.modal_escape_presses = 0
+
+    # ---- 弹窗 ----
+    def modal_visible(self) -> bool:
+        """额度 / 升级弹窗此刻是否还在页面上。"""
+        return self.limit_modal is not None and not self.modal_dismissed
+
+    def _click_modal_close(self) -> None:
+        self.modal_clicks += 1
+        if self.modal_click_works:
+            self.modal_dismissed = True
 
     # ---- Playwright 接口子集 ----
     def is_closed(self) -> bool:
@@ -127,6 +165,13 @@ class FakePage:
 
     async def close(self) -> None:
         self.closed = True
+
+    async def query_selector(self, selector: str) -> Optional[FakeElement]:
+        selector = selector.strip()
+        # 探针会在关闭控件上打标记，这里把标记选择器回成可点的替身。
+        if selectors.MODAL_MARKER_ATTR in selector and self.modal_visible() and self.modal_closable:
+            return FakeElement("", on_click=self._click_modal_close)
+        return None
 
     async def query_selector_all(self, selector: str) -> List[FakeElement]:
         selector = selector.strip()
@@ -165,6 +210,33 @@ class FakePage:
                 "streaming": value,
                 "streaming_selector": (config.RESPONSE_SELECTORS or [None])[0],
                 "stop_control": stop_control,
+            }
+        if expression == selectors.MODAL_PROBE_JS:
+            opts = arg or {}
+            patterns = [str(p).lower() for p in (opts.get("text") or []) if str(p)]
+            empty = {
+                "present": False,
+                "selector": None,
+                "pattern": "",
+                "close": False,
+                "close_kind": None,
+                "containers": 0,
+                "text_len": 0,
+            }
+            if not self.modal_visible():
+                return empty
+            text = str(self.limit_modal).lower()
+            hit = next((p for p in patterns if p in text), "")
+            if not hit:
+                return empty
+            return {
+                "present": True,
+                "selector": (opts.get("container") or [None])[0],
+                "pattern": hit,
+                "close": bool(self.modal_closable),
+                "close_kind": ("selector" if opts.get("close") else "text") if self.modal_closable else None,
+                "containers": 1,
+                "text_len": len(str(self.limit_modal)),
             }
         if expression == selectors.BODY_TEXT_JS:
             return self.body_text

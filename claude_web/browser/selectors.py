@@ -12,7 +12,7 @@
 """
 
 #: 选择器 / DOM 提取逻辑的版本号：Claude 网页改版导致选择器失效时用于诊断。
-SELECTOR_VERSION = "2026-10-12.1"
+SELECTOR_VERSION = "2026-10-12.2"
 
 # ---- JS 片段 ----
 
@@ -265,6 +265,94 @@ REPLY_STATE_JS = """
 #: 「生成中」探测的硬编码兜底选择器（config 候选全落空时仍可用）。
 GENERATING_FALLBACK = 'button[aria-label*="Stop"], [data-is-streaming="true"]'
 
+#: 标记「本函数挑出的关闭控件」的属性名。
+#:
+#: 探测（JS）与点击（Playwright）分开：JS 只能回布尔与计数，不能把节点交给 Python。
+#: 因此 JS 在选中的关闭控件上打这个标记，Python 再用真实点击（而不是 JS 合成点击）
+#: 去关弹窗——真实点击更接近用户操作，也让「点击失败」能被如实观察到。
+MODAL_MARKER_ATTR = "data-claude-bridge-dismiss"
+
+# 关闭挡路的弹窗（额度用尽 / 升级提示）。
+#
+# 事故背景（2026-10-12）：网页额度用尽后，claude.ai 会弹出一个 ``role="dialog"`` 的
+# 「Upgrade to keep chatting / You hit your 5-hour message limit」弹窗。它盖住输入区，
+# 于是：填充仍能写入 DOM，但焦点被弹窗抢走 → Enter 不生效 → 桥接先报「提交未生效」，
+# 或者回复迟迟不出现、静止满 STALL_S 后报「生成停滞」。用户看到的是「网页明明能回答
+# （或额度就是没了），桥却说生成停滞」。
+#
+# 这个探针只做两件事：**认出**这类弹窗（可见容器 + 配置文案特征），并在它内部**挑一个
+# 关闭类控件**打标记。它绝不点击升级 / 购买类按钮，也不读取或回传任何页面正文
+# （只回布尔、命中项与文本长度）。
+MODAL_PROBE_JS = """
+    (opts) => {
+      const containers = (opts && opts.container) || [];
+      const closeSelectors = (opts && opts.close) || [];
+      const closeWords = ((opts && opts.close_text) || []).map((w) => String(w).toLowerCase());
+      const patterns = ((opts && opts.text) || []).map((w) => String(w).toLowerCase()).filter((w) => w);
+      const marker = (opts && opts.marker) || 'data-claude-bridge-dismiss';
+      const visible = (el) => {
+        try {
+          const rects = el.getClientRects ? el.getClientRects() : null;
+          if (rects && rects.length) return true;
+          const r = el.getBoundingClientRect();
+          return !!(r && r.width > 0 && r.height > 0);
+        } catch (e) { return false; }
+      };
+      // 先清掉上一轮留下的标记，避免点到陈旧节点（探测是幂等的）。
+      try {
+        for (const el of document.querySelectorAll('[' + marker + ']')) el.removeAttribute(marker);
+      } catch (e) {}
+      const result = {
+        present: false, selector: null, pattern: '', close: false, close_kind: null,
+        containers: 0, text_len: 0,
+      };
+      for (const selector of containers) {
+        let nodes = [];
+        try { nodes = document.querySelectorAll(selector); } catch (e) { continue; }
+        for (const node of nodes) {
+          if (!visible(node)) continue;
+          result.containers += 1;
+          const text = String(node.innerText || node.textContent || '');
+          const lowered = text.toLowerCase();
+          const hit = patterns.find((p) => lowered.includes(p));
+          if (!hit) continue;
+          result.present = true;
+          result.selector = selector;
+          result.pattern = hit;
+          result.text_len = text.length;
+          let target = null;
+          // 1) 显式关闭控件（按 aria-label / data-testid 的候选选择器）。
+          for (const cs of closeSelectors) {
+            try {
+              const found = Array.from(node.querySelectorAll(cs)).find(visible);
+              if (found) { target = found; result.close_kind = 'selector'; break; }
+            } catch (e) {}
+          }
+          // 2) 按文案找「先不用 / 稍后 / 关闭」这类一次性按钮（**不点**升级 / 购买）。
+          if (!target) {
+            for (const b of node.querySelectorAll('button, [role="button"]')) {
+              if (!visible(b)) continue;
+              const label = [
+                b.getAttribute('aria-label') || '',
+                b.getAttribute('data-testid') || '',
+                b.getAttribute('title') || '',
+                (b.textContent || ''),
+              ].join(' ').replace(/\\s+/g, ' ').trim().toLowerCase();
+              const word = closeWords.find((w) => w && label.includes(w));
+              if (word) { target = b; result.close_kind = 'text'; break; }
+            }
+          }
+          if (target) {
+            try { target.setAttribute(marker, '1'); result.close = true; } catch (e) {}
+          }
+          break;
+        }
+        if (result.present) break;
+      }
+      return result;
+    }
+    """
+
 __all__ = [
     "SELECTOR_VERSION",
     "COMPLETE_TEXT_JS",
@@ -272,5 +360,7 @@ __all__ = [
     "PAGE_PROBE_JS",
     "BODY_TEXT_JS",
     "REPLY_STATE_JS",
+    "MODAL_PROBE_JS",
+    "MODAL_MARKER_ATTR",
     "GENERATING_FALLBACK",
 ]

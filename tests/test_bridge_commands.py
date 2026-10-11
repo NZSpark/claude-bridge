@@ -106,6 +106,46 @@ def test_status_reply_works_when_browser_unavailable(tmp_path):
     assert "尚未启动" in reply
 
 
+def test_modal_command_closes_limit_popup(tmp_path):
+    """`/bridge modal`：额度用尽弹窗要能被关掉，并如实报告命中的文案。"""
+    import asyncio
+
+    page = FakePage(
+        limit_modal="Upgrade to keep chatting. You hit your 5-hour message limit."
+    )
+    service = _service(page, tmp_path)
+    reply = asyncio.run(handle_command([{"role": "user", "content": "/bridge modal"}], service, BUCKET))
+    assert reply is not None and "已关闭页面上的额度/升级弹窗" in reply
+    assert "message limit" in reply
+    assert page.modal_clicks == 1
+    assert page.modal_dismissed is True
+
+
+def test_modal_command_reports_absence(tmp_path):
+    import asyncio
+
+    page = FakePage()
+    service = _service(page, tmp_path)
+    reply = asyncio.run(handle_command([{"role": "user", "content": "/bridge popup"}], service, BUCKET))
+    assert reply is not None and "没有额度/升级弹窗" in reply
+    assert page.modal_clicks == 0
+
+
+def test_modal_command_works_when_browser_unavailable(tmp_path):
+    """浏览器不可用时也要回一行可解释的应答，而不是抛给客户端。"""
+    import asyncio
+
+    driver = _UnavailableDriver(lambda: FakePage())
+    service = _service(FakePage(), tmp_path, driver=driver)
+    reply = asyncio.run(handle_command([{"role": "user", "content": "/bridge modal"}], service, BUCKET))
+    assert reply is not None and "命令未执行" in reply
+
+
+def test_modal_command_rejects_arguments():
+    command = parse_command("/bridge modal now")
+    assert command is not None and command.action == "invalid"
+
+
 def test_session_link_binds_bucket_and_navigates(tmp_path):
     import asyncio
 

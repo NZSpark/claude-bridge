@@ -50,6 +50,7 @@ _USAGE = (
     f"  {BRIDGE_COMMAND} help [{'|'.join(HELP_TOPICS)}]  命令列表 / 分主题帮助\n"
     f"  {BRIDGE_COMMAND} status  桥接与当前会话桶状态摘要\n"
     f"  {BRIDGE_COMMAND} models  本桥对外公布的模型名（同 GET /v1/models）\n"
+    f"  {BRIDGE_COMMAND} modal  关闭挡路的额度/升级弹窗（不改变会话状态）\n"
     f"  {BRIDGE_COMMAND} session [status]  当前桶的会话状态摘要\n"
     f"  {BRIDGE_COMMAND} session reset  下一轮开新网页会话并播种完整历史\n"
     f"  {BRIDGE_COMMAND} session link <URL> [{SEED_FLAG}]  绑定到指定网页会话\n"
@@ -75,6 +76,11 @@ REGISTRY: tuple = (
     CommandSpec(f"{BRIDGE_COMMAND} help [{'|'.join(HELP_TOPICS)}]", "查看命令列表 / 分主题帮助"),
     CommandSpec(f"{BRIDGE_COMMAND} status", "桥接、浏览器与当前会话桶的状态摘要"),
     CommandSpec(f"{BRIDGE_COMMAND} models", "本桥对外公布的模型名（与 GET /v1/models 同源）"),
+    CommandSpec(
+        f"{BRIDGE_COMMAND} modal",
+        "关闭挡路的额度/升级弹窗（只点关闭类控件，不改会话状态）",
+        readonly=False,
+    ),
     CommandSpec(f"{BRIDGE_COMMAND} session [status]", "当前桶的会话状态摘要", "session"),
     CommandSpec(
         f"{BRIDGE_COMMAND} session reset",
@@ -101,7 +107,7 @@ REGISTRY: tuple = (
 class BridgeCommand:
     """一条已被识别的 ``/bridge`` 命令。"""
 
-    action: str  # "help" | "status" | "models" | "session" | "invalid"
+    action: str  # "help" | "status" | "models" | "modal" | "session" | "invalid"
     subaction: str = ""  # help 主题 / session 子命令
     target: str = ""  # session link 的会话地址（原样，执行时再校验归一化）
     seed: bool = False  # session link 是否带 --seed
@@ -153,6 +159,10 @@ def parse_command(text: str) -> Optional[BridgeCommand]:
         if rest:
             return _invalid(f"{BRIDGE_COMMAND} models 不接受参数。")
         return BridgeCommand("models")
+    if head in ("modal", "popup"):
+        if rest:
+            return _invalid(f"{BRIDGE_COMMAND} modal 不接受参数。")
+        return BridgeCommand("modal")
     if head == "session":
         return _parse_session(rest, aliased=False)
     if head in _SESSION_ALIASES:
@@ -295,6 +305,8 @@ async def _execute(command: BridgeCommand, service: Any, bucket: str) -> str:
         return _status_reply(service, bucket)
     if command.action == "models":
         return _models_reply()
+    if command.action == "modal":
+        return await _modal_reply(service, bucket)
     if command.action == "invalid":
         return f"[Bridge] 命令未执行：{command.reason}"
     if command.action == "session":
@@ -411,6 +423,51 @@ def _models_reply() -> str:
         "网页端实际选用的模型（那由登录账号与网页端设置决定）。"
     )
     return "\n".join(lines)
+
+
+async def _modal_reply(service: Any, bucket: str) -> str:
+    """关闭当前桶页面上的额度 / 升级弹窗（只点关闭类控件，绝不点升级 / 付费）。
+
+    额度用尽后站点弹出的那个对话框会盖住输入区并抢走焦点：提示词写得进去、Enter 却不
+    生效。生成链路每轮开始时会自己关一次（``doc/design.md`` 4.3），这个命令是「现在
+    就关掉」的手动入口，也顺便回答「页面上到底有没有这个弹窗」。
+    """
+    try:
+        page = await service.driver.page_for(bucket)
+        state = await service.driver.dom.dismiss_limit_modal(page)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[命令] bucket=%s %s modal 失败：%s", bucket, BRIDGE_COMMAND, type(exc).__name__)
+        return "\n".join(
+            [
+                f"[Bridge] 命令未执行：拿不到会话桶 {bucket} 的页面（{type(exc).__name__}）。",
+                " 可能原因：浏览器未启动 / 页面已失效。只读命令（status / models）不受影响；",
+                " 下一个生成请求会惰性启动浏览器并重试。",
+            ]
+        )
+    if state.found and state.dismissed:
+        logger.info("[命令] bucket=%s 已关闭额度/升级弹窗（命中 %s）。", bucket, state.pattern)
+        return "\n".join(
+            [
+                f"[Bridge] 已关闭页面上的额度/升级弹窗（命中：{state.pattern}）。",
+                " 只点了关闭类控件，没有点升级 / 付费按钮，也没有改动会话与页面内容。",
+                " 注意：这只是关掉提示框；若确实是额度用尽，生成仍会失败并报 usage_limit_reached，",
+                "  需要等额度重置或升级后才能继续。",
+            ]
+        )
+    if state.found and not state.dismissed:
+        return "\n".join(
+            [
+                f"[Bridge] 找到了额度/升级弹窗（命中：{state.pattern}）但没能关掉（{state.reason}）。",
+                " 可能原因：站点改版换了关闭控件。请在浏览器里手动关一次，",
+                f"  并把新选择器加进 {BRIDGE_COMMAND} 的 MODAL_CLOSE_SELECTORS 配置。",
+            ]
+        )
+    return "\n".join(
+        [
+            f"[Bridge] 会话桶 {bucket} 的页面上没有额度/升级弹窗（不用关）。",
+            " 生成链路每轮开始时会自己检查并关掉它；这里没命中就说明当前页面上确实没有。",
+        ]
+    )
 
 
 def _status_reply(service: Any, bucket: str) -> str:

@@ -318,6 +318,87 @@ def test_generating_probe_failure_is_unknown():
     assert state.reason == "unknown"
 
 
+# ---- 额度用尽 / 升级弹窗（doc/design.md 4.3）----
+#
+# 事故现象（2026-10-12）：网页额度用尽后 claude.ai 弹出「Upgrade to keep chatting /
+# You hit your 5-hour message limit」对话框，它盖住输入区并抢走焦点；提示词写得进去
+# 但 Enter 不生效、回复也不出现，桥接于是误报「提交未生效 / 生成停滞」。
+
+LIMIT_MODAL_TEXT = (
+    "Upgrade to keep chatting. You hit your 5-hour message limit. "
+    "It resets at 2:10 PM, or you can upgrade for higher limits."
+)
+
+
+def _dismiss(page: FakePage):
+    return asyncio.run(ClaudeDOMAdapter().dismiss_limit_modal(page))
+
+
+def test_limit_modal_is_detected_and_closed_by_real_click():
+    page = FakePage(limit_modal=LIMIT_MODAL_TEXT)
+    state = _dismiss(page)
+    assert state.found is True
+    assert state.dismissed is True
+    assert state.present is False
+    assert state.reason == "closed"
+    # 命中项是**配置里的文案**（不是页面正文），用于诊断。
+    assert state.pattern == "message limit"
+    # 关掉它靠的是真实点击（而不是 JS 合成点击），且只点了一次。
+    assert page.modal_clicks == 1
+    assert page.modal_dismissed is True
+
+
+def test_unrelated_dialog_is_left_untouched():
+    """只是普通对话框（没命中额度文案）时不能动它。"""
+    page = FakePage(limit_modal="我们更新了服务条款，请查阅。")
+    state = _dismiss(page)
+    assert state.found is False
+    assert state.reason == "none"
+    assert page.modal_clicks == 0
+    assert page.modal_escape_presses == 0
+
+
+def test_no_modal_costs_nothing():
+    page = FakePage()
+    state = _dismiss(page)
+    assert state.quota_hit is False
+    assert page.modal_clicks == 0
+
+
+def test_modal_without_close_control_falls_back_to_escape():
+    """没有可点关闭控件时退化到 Escape（仍然不点升级 / 付费按钮）。"""
+    page = FakePage(limit_modal=LIMIT_MODAL_TEXT, modal_closable=False)
+    state = _dismiss(page)
+    assert state.found is True
+    assert state.dismissed is True
+    assert page.modal_clicks == 0
+    assert page.modal_escape_presses == 1
+
+
+def test_stuck_modal_is_reported_without_raising():
+    """关不掉的弹窗不能把请求本身变成异常：如实回报，由调用方归因。"""
+    page = FakePage(
+        limit_modal=LIMIT_MODAL_TEXT, modal_click_works=False, modal_escape_dismisses=False
+    )
+    state = _dismiss(page)
+    assert state.found is True
+    assert state.dismissed is False
+    assert state.present is True
+    assert state.reason == "close_failed"
+    assert state.quota_hit is True
+
+
+def test_dismiss_can_be_disabled(monkeypatch):
+    """开关关掉时只探测、不点击（仍能把失败归因到额度）。"""
+    monkeypatch.setattr(config, "MODAL_DISMISS_ENABLED", False)
+    page = FakePage(limit_modal=LIMIT_MODAL_TEXT)
+    state = _dismiss(page)
+    assert state.found is True
+    assert state.dismissed is False
+    assert state.reason == "disabled"
+    assert page.modal_clicks == 0
+
+
 def test_composer_contains_distinguishes_empty_from_unavailable():
     """``None`` = 读不出来（未知），不能当成「输入区里没这段文本」。"""
     dom = ClaudeDOMAdapter()

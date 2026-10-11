@@ -29,6 +29,7 @@ class ErrorCode(str, Enum):
     GENERATION_TIMEOUT = "generation_timeout"
     GENERATION_STALLED = "generation_stalled"
     CONTEXT_LIMIT_REACHED = "context_limit_reached"
+    USAGE_LIMIT_REACHED = "usage_limit_reached"
     SESSION_CONFLICT = "session_conflict"
     SESSION_BUSY = "session_busy"
     TOOL_CALL_PARSE_ERROR = "tool_call_parse_error"
@@ -57,6 +58,7 @@ _HTTP_STATUS: Dict[ErrorCode, int] = {
     ErrorCode.SESSION_CONFLICT: 502,
     ErrorCode.GENERATION_TIMEOUT: 504,
     ErrorCode.GENERATION_STALLED: 504,
+    ErrorCode.USAGE_LIMIT_REACHED: 429,
     ErrorCode.TOOL_CALL_PARSE_ERROR: 422,
 }
 
@@ -158,6 +160,16 @@ class ContextLimitError(BrowserError):
     """网页会话已达上下文长度上限（网页版会停止响应，必须换新会话）。"""
 
     code = ErrorCode.CONTEXT_LIMIT_REACHED
+
+
+class UsageLimitError(BrowserError):
+    """网页账号的用量额度已用尽（站点弹出升级 / 额度提示，本轮无法生成）。
+
+    与 :class:`GenerationStalledError` 的区别是**归因**：这不是页面卡住，而是额度没了——
+    客户端据此应该等待额度重置（或升级），而不是重试同一个请求。
+    """
+
+    code = ErrorCode.USAGE_LIMIT_REACHED
 
 
 class SessionConflictError(BrowserError):

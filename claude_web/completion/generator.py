@@ -35,6 +35,7 @@ from ..errors import (
     GenerationTimeoutError,
     PromptSubmissionError,
     ReplyNotFoundError,
+    UsageLimitError,
 )
 from ..models import ToolCall, ToolSpec
 from ..toolcalls import ParsedToolCalls, parse_tool_calls, strip_tool_call_blocks
@@ -165,6 +166,20 @@ class ReplyGenerator:
         buffered = bool(tool_list) and config.TOOL_CALL_BUFFER
 
         await self.dom.ensure_usable(page)
+        # 额度用尽 / 升级弹窗会盖住输入区并抢走焦点：提示词写得进去，Enter 却不生效，
+        # 于是先报「提交未生效」，再报「生成停滞」，而真正的原因是额度没了。
+        # 提交前先把它关掉（只点关闭类控件，见 doc/design.md 4.3）。
+        modal = await self.dom.dismiss_limit_modal(page)
+        # 提交前就看到了额度/升级弹窗：失败时据此把原因归到「额度用尽」而不是「停滞」。
+        # 弹窗很可能已经被关掉了，所以把命中项也留给失败详情（探测不到时它就是唯一线索）。
+        limit_modal_seen = modal.quota_hit
+        limit_modal_pattern = modal.pattern if limit_modal_seen else None
+        if limit_modal_seen:
+            logger.info(
+                "[生成] 页面存在额度/升级弹窗（%s），已尝试关闭（dismissed=%s）",
+                modal.pattern,
+                modal.dismissed,
+            )
         baseline: ReplyBaseline = await self.extractor.baseline(page)
 
         await self._fill(page, prompt)
@@ -319,6 +334,23 @@ class ReplyGenerator:
             )
 
             if verdict.action in ("fail_stalled", "fail_timeout") and not context_checked:
+                # 失败归因顺序：额度用尽 / 升级弹窗 > 会话到顶。前者更具体，也更常见
+                # （额度没了时页面同样不会再有新内容）。探测只在**即将判定失败**时做一次。
+                limit_modal = await self.dom.dismiss_limit_modal(page)
+                if limit_modal.quota_hit or limit_modal_seen:
+                    _log_end("失败：网页额度已用尽（页面弹出升级/额度弹窗）", chars=len(normalized))
+                    raise UsageLimitError(
+                        "网页版额度已用尽：页面弹出了升级/额度提示，本轮没有生成"
+                        "（重试无效，请等额度重置或升级后再试）",
+                        detail={
+                            "polls": polls,
+                            "seen_at_submit": limit_modal_seen,
+                            **_counts_detail(),
+                            **limit_modal.as_detail(),
+                            # 关闭后的复探拿不到命中项：回退到提交前那一次的结果。
+                            "pattern": limit_modal.pattern or limit_modal_pattern,
+                        },
+                    )
                 # 「会话到顶」的整页扫描只在**即将判定失败**时做一次（doc/design.md 4.4）：
                 # 该扫描要读整页可见文本（强制布局），正常轮次一次都不扫；更关键的是，
                 # 把它吊在「每次请求都会命中一次」的位置上会带来假阳性——页面别处（会话

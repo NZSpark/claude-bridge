@@ -13,7 +13,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Iterable, List, Optional, Tuple
 
 from .. import config
@@ -113,6 +113,44 @@ class GeneratingState:
             "stop_control": self.stop_control,
             "selector": self.selector,
             "reason": self.reason,
+        }
+
+
+@dataclass
+class ModalState:
+    """「额度用尽 / 升级」类弹窗的探测与关闭结果（doc/design.md 4.3）。
+
+    * ``found``：本次探测是否发现了这类弹窗（与是否成功关掉无关）；
+    * ``dismissed``：是否已经把它关掉；
+    * ``present``：关闭尝试之后它是否仍在页面上；
+    * ``reason``：``none`` / ``closed`` / ``no_close_control`` / ``close_failed`` /
+      ``disabled`` / ``probe_failed``（诊断用，不回显页面正文）。
+
+    只含布尔、命中特征与文本长度，不含页面正文。
+    """
+
+    found: bool = False
+    dismissed: bool = False
+    present: bool = False
+    reason: str = "none"
+    pattern: Optional[str] = None
+    selector: Optional[str] = None
+    close_kind: Optional[str] = None
+    text_len: int = 0
+
+    @property
+    def quota_hit(self) -> bool:
+        """是否真的出现了「额度用尽 / 升级」弹窗（用于把失败如实归类）。"""
+        return self.found or self.present
+
+    def as_detail(self) -> dict:
+        return {
+            "found": self.found,
+            "dismissed": self.dismissed,
+            "present": self.present,
+            "reason": self.reason,
+            "pattern": self.pattern,
+            "close_kind": self.close_kind,
         }
 
 
@@ -292,6 +330,106 @@ class ClaudeDOMAdapter(DiagnosticsMixin):
     async def is_generating(self, page: Any) -> Optional[bool]:
         """页面是否仍在生成；探测失败返回 ``None``（未知）。"""
         return (await self.generating_state(page)).generating
+
+    # ---- 挡路弹窗（额度用尽 / 升级）----
+    async def limit_modal_state(self, page: Any) -> ModalState:
+        """探测「额度用尽 / 升级」类弹窗（只回布尔、命中特征与文本长度）。
+
+        探到就在它内部挑一个**关闭类**控件打上标记（见 ``selectors.MODAL_MARKER_ATTR``），
+        让调用方能用真实点击关掉它。探测失败按「没有弹窗」处理（与旧行为一致）。
+        """
+        try:
+            info = await page.evaluate(
+                selectors.MODAL_PROBE_JS,
+                {
+                    "container": list(config.MODAL_CONTAINER_SELECTORS),
+                    "close": list(config.MODAL_CLOSE_SELECTORS),
+                    "close_text": list(config.MODAL_CLOSE_TEXT_PATTERNS),
+                    "text": list(config.MODAL_TEXT_PATTERNS),
+                    "marker": selectors.MODAL_MARKER_ATTR,
+                },
+            )
+        except Exception:  # noqa: BLE001
+            return ModalState(reason="probe_failed")
+        if not isinstance(info, dict):
+            return ModalState(reason="probe_failed")
+        found = bool(info.get("present"))
+        return ModalState(
+            found=found,
+            present=found,
+            reason="none" if not found else ("close_ready" if info.get("close") else "no_close_control"),
+            pattern=str(info.get("pattern") or "") or None,
+            selector=str(info.get("selector") or "") or None,
+            close_kind=str(info.get("close_kind") or "") or None,
+            text_len=int(info.get("text_len") or 0),
+        )
+
+    async def dismiss_limit_modal(self, page: Any) -> ModalState:
+        """关掉盖住输入区的「额度用尽 / 升级」弹窗（默认开启，可用配置关闭）。
+
+        为什么需要：额度用尽后站点会弹出 ``role="dialog"`` 的升级提示，它盖住输入区并
+        抢走焦点。此时提示词**写进去了**但 Enter 不生效、回复也不出现，桥接随即误报
+        「提交未生效 / 生成停滞」——用户看到的是「网页明明没问题，桥却说生成停滞」。
+
+        安全约束（doc/design.md 1.2、4.3）：
+
+        * 只点**关闭 / 先不用**类控件，绝不点升级、购买、订阅等任何按钮；
+        * 只处理「可见容器 + 命中配置文案」的弹窗，普通对话框一律不碰；
+        * 任何一步失败都不抛异常（关不了弹窗不是请求失败的理由），由调用方看
+          :class:`ModalState` 决定如何如实上报。
+        """
+        state = await self.limit_modal_state(page)
+        if not state.found:
+            return state
+        logger.info(
+            "[弹窗] 检测到额度/升级弹窗（命中 %s，容器 %s，关闭控件 %s）",
+            state.pattern,
+            state.selector,
+            state.close_kind or "无",
+        )
+        if not config.MODAL_DISMISS_ENABLED:
+            return replace(state, reason="disabled")
+        if state.close_kind is not None:
+            await self._click_modal_close(page)
+        else:
+            await self._press_escape(page)
+        after = await self.limit_modal_state(page)
+        if after.found:
+            # 点击没生效（或只找到「先不用」但站点没关）：退化到 Escape。
+            await self._press_escape(page)
+            after = await self.limit_modal_state(page)
+        if after.found:
+            logger.warning("[弹窗] 额度/升级弹窗仍然在页面上（%s）", after.reason)
+            return replace(after, found=True, dismissed=False, reason="close_failed")
+        logger.info("[弹窗] 已关闭额度/升级弹窗（命中 %s）", state.pattern)
+        return replace(state, found=True, dismissed=True, present=False, reason="closed")
+
+    async def _click_modal_close(self, page: Any) -> bool:
+        """点击探针标出的关闭控件（真实点击；失败返回 False）。"""
+        try:
+            element = await page.query_selector(f'[{selectors.MODAL_MARKER_ATTR}="1"]')
+        except Exception:  # noqa: BLE001
+            return False
+        if element is None:
+            return False
+        try:
+            await _maybe_await(element.click())
+            return True
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("[弹窗] 点击关闭控件失败：%s", type(exc).__name__)
+            return False
+
+    async def _press_escape(self, page: Any) -> bool:
+        """按 Escape（关闭控件的退化路径）；失败返回 False。"""
+        keyboard = getattr(page, "keyboard", None)
+        if keyboard is None:
+            return False
+        try:
+            await _maybe_await(keyboard.press("Escape"))
+            return True
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("[弹窗] Escape 关闭失败：%s", type(exc).__name__)
+            return False
 
     async def detect_context_limit(self, page: Any) -> bool:
         """页面是否出现可识别的「会话到顶」提示（排除回复正文的影响）。"""
@@ -574,6 +712,7 @@ class ClaudeDOMAdapter(DiagnosticsMixin):
 __all__ = [
     "ClaudeDOMAdapter",
     "GeneratingState",
+    "ModalState",
     "PageStatus",
     "ReplySnapshot",
     "ReplyState",

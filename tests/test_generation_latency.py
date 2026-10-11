@@ -18,8 +18,19 @@ import pytest
 from claude_web import config
 from claude_web.browser import selectors
 from claude_web.completion.generator import ReplyGenerator
-from claude_web.errors import PromptSubmissionError, ReplyNotFoundError
+from claude_web.errors import (
+    GenerationStalledError,
+    PromptSubmissionError,
+    ReplyNotFoundError,
+    UsageLimitError,
+)
 from tests.fakes import FakePage, VirtualClock
+
+#: 真实页面上额度用尽时的弹窗文案（2026-10-12 用 CDP 逐节点核对）。
+LIMIT_MODAL_TEXT = (
+    "Upgrade to keep chatting. You hit your 5-hour message limit. "
+    "It resets at 2:10 PM, or you can upgrade for higher limits."
+)
 
 
 @pytest.fixture
@@ -93,6 +104,54 @@ def test_lost_submission_fails_within_submit_window(
     with pytest.raises(PromptSubmissionError):
         asyncio.run(ReplyGenerator().generate(page, "hi"))
     assert clock.total < 8.0
+
+
+def test_usage_limit_modal_is_reported_instead_of_stall(
+    clock: VirtualClock, monkeypatch, default_timing
+):
+    """额度用尽：提示词没发出去（提交落空）时，要如实报额度用尽，而不是「提交未生效」。"""
+    monkeypatch.setattr(config, "MAX_UPSTREAM_RETRIES", 0)
+    page = FakePage(
+        snapshots=[],
+        generating_plan=[False],
+        submit_lands=False,
+        limit_modal=LIMIT_MODAL_TEXT,
+    )
+    with pytest.raises(UsageLimitError) as excinfo:
+        asyncio.run(ReplyGenerator().generate(page, "hi"))
+    assert excinfo.value.code.value == "usage_limit_reached"
+    assert excinfo.value.http_status == 429
+    # 提交前就把挡路的弹窗关掉（只点关闭类控件），而不是等它自己消失。
+    assert page.modal_clicks == 1
+    assert page.modal_dismissed is True
+    # 走的是 SUBMIT_LOST_S 快速失败，不是停滞窗口。
+    assert clock.total < 8.0
+
+
+def test_stalled_round_with_quota_modal_names_the_real_cause(
+    clock: VirtualClock, monkeypatch, default_timing
+):
+    """回复节点一直空白 + 页面有额度弹窗：归因为额度用尽，而不是「生成停滞」。"""
+    monkeypatch.setattr(config, "MAX_UPSTREAM_RETRIES", 0)
+    page = FakePage(
+        snapshots=[""], generating_plan=[True, False], limit_modal=LIMIT_MODAL_TEXT
+    )
+    with pytest.raises(UsageLimitError) as excinfo:
+        asyncio.run(ReplyGenerator().generate(page, "hi"))
+    assert excinfo.value.detail["seen_at_submit"] is True
+    assert excinfo.value.detail["pattern"] == "message limit"
+
+
+def test_empty_reply_node_without_modal_is_still_a_stall(
+    clock: VirtualClock, monkeypatch, default_timing
+):
+    """对照：同样是静止不动，但页面没有额度弹窗时，仍然按停滞快速失败。"""
+    monkeypatch.setattr(config, "MAX_UPSTREAM_RETRIES", 0)
+    page = FakePage(snapshots=[""], generating_plan=[True, False])
+    with pytest.raises(GenerationStalledError):
+        asyncio.run(ReplyGenerator().generate(page, "hi"))
+    assert page.modal_clicks == 0
+    assert 30.0 <= clock.total <= 32.0
 
 
 def test_successful_run_does_no_full_page_scan(
