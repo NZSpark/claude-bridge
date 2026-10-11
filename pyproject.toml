@@ -1,0 +1,54 @@
+# 项目元数据与工具配置（doc/design.md 第 7/8 节）。
+# 与同目录族的 ChatGPTBridge / GeminiBridge 保持同一套工具链：
+# 运行期依赖带上下界、dev extra、pytest / ruff / mypy 配置与构建后端。
+[project]
+name = "claudebridge"
+version = "0.1.0"
+description = "把 Claude 网页版（claude.ai）桥接成 OpenAI 兼容 API（复用本地已登录会话）"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "fastapi>=0.115,<1",
+    "uvicorn>=0.30,<1",
+    "playwright>=1.45,<2",
+    "pydantic>=2.7,<3",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8,<10",
+    "httpx>=0.27,<1",   # fastapi.testclient 依赖
+    "ruff>=0.6,<1",
+    "openai>=1,<4",     # E2E 客户端冒烟测试用
+]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = [
+    "claude_web",
+    "claude_web.api",
+    "claude_web.browser",
+    "claude_web.completion",
+    "claude_web.session",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+# tests/e2e/ 默认全部 skip，需 CLAUDE_E2E=1 才会运行真实浏览器用例：
+# 前置条件与场景矩阵见 doc/e2e_test_design.md。
+
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+
+[tool.ruff.lint]
+# 规则集刻意收敛：先只锁定「一定不能坏」的四类，后续再逐步扩。
+select = ["E4", "E7", "E9", "F", "I"]
+
+[tool.ruff.lint.per-file-ignores]
+# driver.py 顶部先定义 playwright 占位、再惰性 import：E402 属有意为之。
+"claude_web/driver.py" = ["E402"]

@@ -1,0 +1,455 @@
+"""FastAPI 应用、路由、鉴权与错误映射（doc/design.md 3、9、10）。
+
+本模块只负责 HTTP 契约：请求校验、鉴权、请求 ID、错误到状态码的映射。
+它**不直接查询 DOM**，所有浏览器交互都通过 :class:`~claude_web.service.ChatService`。
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+import secrets
+from contextlib import asynccontextmanager
+from typing import Any, AsyncIterator, Dict, Optional
+
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse, StreamingResponse
+from pydantic import ValidationError
+
+from . import config
+from .api.chat_adapter import (
+    StreamEncoder,
+    build_completion_response,
+    build_sse_headers,
+    to_task,
+)
+from .api.responses_adapter import (
+    build_response_object,
+    response_events,
+    store_thread,
+    to_task_from_responses,
+)
+from .api.streaming_adapter import sse_comment, sse_error
+from .browser.selectors import SELECTOR_VERSION
+from .errors import (
+    BridgeError,
+    ErrorCode,
+    InvalidRequestError,
+    NotReadyError,
+    UnauthorizedError,
+)
+from .logging_setup import current_request_id, log_context, new_request_id, redact
+from .metrics import metrics
+from .models import ChatCompletionRequest, ChatTask, ModelCard, advertised_models
+from .prompting import delta_piece
+from .service import ChatService, service
+
+logger = logging.getLogger(__name__)
+
+
+# ==================== 请求辅助 ====================
+
+
+def _sanitize_key(raw: Optional[str]) -> str:
+    """桶键清洗：只保留安全字符并限制长度。"""
+    if not raw:
+        return config.DEFAULT_SESSION_KEY
+    cleaned = "".join(ch for ch in str(raw) if ch.isalnum() or ch in "-_.@:")
+    cleaned = cleaned.strip("-_.")[: config.SESSION_KEY_MAX_LEN]
+    return cleaned or config.DEFAULT_SESSION_KEY
+
+
+def _session_key(request: Request, body: Optional[Dict[str, Any]]) -> str:
+    """按优先级选择会话桶（doc/design.md 5.1）。"""
+    if not config.SESSION_SCOPING:
+        return config.DEFAULT_SESSION_KEY
+    header = request.headers.get(config.SESSION_KEY_HEADER)
+    raw = header
+    if not raw and isinstance(body, dict):
+        user = body.get("user")
+        raw = user if isinstance(user, str) else None
+    if not raw and config.SESSION_SCOPING_BY_UA:
+        raw = request.headers.get("user-agent")
+    return _sanitize_key(raw)
+
+
+def _check_bridge_auth(request: Request) -> None:
+    """校验可选的 Bearer Token（保护生成类 API 与管理端点）。"""
+    token = config.BRIDGE_TOKEN
+    if not token:
+        return
+    header = request.headers.get("authorization", "")
+    if not header.lower().startswith("bearer "):
+        raise UnauthorizedError("缺少 Bearer Token")
+    provided = header[7:].strip()
+    if not secrets.compare_digest(provided, token):
+        raise UnauthorizedError("Bearer Token 无效")
+
+
+def _check_reset_token(request: Request) -> None:
+    token = config.RESET_TOKEN
+    if not token:
+        return
+    provided = request.headers.get("x-reset-token", "")
+    if not secrets.compare_digest(provided, token):
+        raise UnauthorizedError("重置令牌无效", code=ErrorCode.UNAUTHORIZED)
+
+
+async def _read_json(request: Request) -> Dict[str, Any]:
+    try:
+        body = await request.json()
+    except Exception as exc:  # noqa: BLE001
+        raise InvalidRequestError("请求体必须是合法 JSON") from exc
+    if not isinstance(body, dict):
+        raise InvalidRequestError("请求体必须是 JSON 对象")
+    return body
+
+
+def _error_response(exc: BridgeError, request_id: str) -> JSONResponse:
+    return JSONResponse(
+        exc.error_body(),
+        status_code=exc.http_status,
+        headers={"X-Request-Id": request_id},
+    )
+
+
+# ==================== 应用 ====================
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    if not config.is_loopback_host(config.HOST):
+        logger.warning(
+            "\n[启动告警] HOST=%s 不是回环地址：任何能访问该地址的人都能复用你的 Claude "
+            "网页登录态与额度，且本服务不对此做保护。请改回 127.0.0.1 并使用 SSH 端口转发 / VPN。",
+            config.HOST,
+        )
+    logger.info(
+        "[启动] ClaudeBridge 监听 %s:%s（selector_version=%s）",
+        config.HOST,
+        config.PORT,
+        SELECTOR_VERSION,
+    )
+    if not config.BRIDGE_TOKEN:
+        logger.warning("[启动] 未设置 BRIDGE_TOKEN：仅适合本机使用，请勿暴露到公网。")
+    if not config.ENABLE_RESPONSES_API:
+        logger.info("[启动] Responses API 未启用（ENABLE_RESPONSES_API=false）。")
+    try:
+        yield
+    finally:
+        try:
+            await service.driver.close()
+        except Exception:  # noqa: BLE001
+            pass
+
+
+app = FastAPI(title="ClaudeBridge", version="0.1.0", lifespan=lifespan)
+
+
+@app.exception_handler(BridgeError)
+async def _bridge_error_handler(request: Request, exc: BridgeError) -> JSONResponse:
+    return _error_response(exc, current_request_id())
+
+
+@app.exception_handler(Exception)
+async def _unhandled_handler(request: Request, exc: Exception) -> JSONResponse:
+    logger.warning("[服务] 未处理异常：%s", type(exc).__name__)
+    safe = NotReadyError("服务内部错误", detail={"error": type(exc).__name__})
+    return _error_response(safe, current_request_id())
+
+
+@app.middleware("http")
+async def _request_context(request: Request, call_next):
+    request_id = request.headers.get("x-request-id") or new_request_id()
+    with log_context(request_id=request_id):
+        response = await call_next(request)
+    response.headers.setdefault("X-Request-Id", request_id)
+    return response
+
+
+# ---- 基础端点 ----
+
+
+@app.get("/")
+async def root() -> Dict[str, Any]:
+    return {
+        "service": "ClaudeBridge",
+        "version": "0.1.0",
+        "endpoints": ["/v1/models", "/v1/chat/completions", "/healthz", "/readiness"],
+    }
+
+
+@app.get("/healthz")
+async def healthz() -> Dict[str, str]:
+    """进程存活 ≠ 能处理请求；可用性请查 /readiness。"""
+    return {"status": "ok"}
+
+
+@app.get("/readiness")
+async def readiness() -> JSONResponse:
+    report = await service.driver.readiness()
+    return JSONResponse(report.to_payload(), status_code=200 if report.ok else 503)
+
+
+@app.get("/metrics")
+async def get_metrics() -> Dict[str, Any]:
+    return metrics.snapshot()
+
+
+@app.get("/diagnostics")
+async def diagnostics() -> Dict[str, Any]:
+    """汇总浏览器、会话桶、选择器与任务状态；**默认不返回正文**。"""
+    report = await service.driver.readiness()
+    return {
+        "selector_version": SELECTOR_VERSION,
+        "browser": report.to_payload(),
+        "buckets": {
+            "pages": service.driver.pool.buckets(),
+            "active": service.locks.active_buckets(),
+        },
+        "sessions": service.lifecycle.store.snapshot(),
+        "locks": service.locks.active_buckets(),
+        "tasks": service.tasks.recent(),
+        "metrics": metrics.snapshot(),
+        "config": {
+            "session_scoping": config.SESSION_SCOPING,
+            "max_session_buckets": config.MAX_SESSION_BUCKETS,
+            "enable_responses_api": config.ENABLE_RESPONSES_API,
+            "auth_enabled": bool(config.BRIDGE_TOKEN),
+        },
+    }
+
+
+@app.get("/v1/models")
+async def list_models() -> Dict[str, Any]:
+    cards = [
+        ModelCard(id=card["id"], owned_by="claude-web-bridge").model_dump()
+        for card in advertised_models()
+    ]
+    return {"object": "list", "data": cards}
+
+
+# ---- 会话管理 ----
+
+
+@app.post("/session/reset")
+async def reset_session(request: Request) -> Dict[str, Any]:
+    _check_bridge_auth(request)
+    _check_reset_token(request)
+    body = await _read_json(request)
+    bucket = _sanitize_key(body.get("session") or body.get("bucket") or _session_key(request, body))
+    await service.lifecycle.reset(bucket)
+    return {"status": "reset", "session": bucket}
+
+
+@app.post("/session/link")
+async def link_session(request: Request) -> Dict[str, Any]:
+    _check_bridge_auth(request)
+    body = await _read_json(request)
+    bucket = _sanitize_key(body.get("session") or body.get("bucket") or _session_key(request, body))
+    url = str(body.get("url") or "")
+    seed = bool(body.get("seed"))
+    normalized = await service.lifecycle.link(bucket, url, seed=seed)
+    return {"status": "linked", "session": bucket, "url": redact(normalized), "seed": seed}
+
+
+@app.post("/session/unlink")
+async def unlink_session(request: Request) -> Dict[str, Any]:
+    _check_bridge_auth(request)
+    body = await _read_json(request)
+    bucket = _sanitize_key(body.get("session") or body.get("bucket") or _session_key(request, body))
+    service.lifecycle.unlink(bucket)
+    return {"status": "unlinked", "session": bucket}
+
+
+@app.get("/session/{bucket}")
+async def session_status(bucket: str) -> Dict[str, Any]:
+    return service.lifecycle.status(_sanitize_key(bucket))
+
+
+# ---- 生成端点 ----
+
+
+@app.post("/v1/chat/completions")
+async def chat_completions(request: Request):
+    _check_bridge_auth(request)
+    body = await _read_json(request)
+    bucket = _session_key(request, body)
+    with log_context(session_key=redact(bucket)):
+        try:
+            parsed = ChatCompletionRequest(**body)
+        except ValidationError as exc:
+            raise InvalidRequestError(
+                "请求字段校验失败", detail={"errors": exc.error_count()}
+            ) from exc
+        task = to_task(parsed, bucket)
+        if parsed.stream:
+            return StreamingResponse(
+                _stream_chat_completion(task, service, request),
+                media_type="text/event-stream",
+                headers=build_sse_headers(),
+            )
+        outcome = await service.run(task)
+        response = build_completion_response(
+            task,
+            text=outcome.result.text,
+            tool_calls=outcome.result.tool_calls,
+            finish_reason=outcome.result.finish_reason,
+            prompt_text=outcome.conversation.prompt,
+        )
+        return JSONResponse(response.model_dump())
+
+
+@app.post("/v1/responses")
+async def responses(request: Request):
+    if not config.ENABLE_RESPONSES_API:
+        raise InvalidRequestError("Responses API 未启用", code=ErrorCode.NOT_FOUND)
+    _check_bridge_auth(request)
+    body = await _read_json(request)
+    bucket = _session_key(request, body)
+    with log_context(session_key=redact(bucket)):
+        task = to_task_from_responses(body, bucket)
+        response_id = f"resp_{new_request_id().replace('-', '')}"
+        if task.stream:
+            return StreamingResponse(
+                _stream_responses(task, service, response_id),
+                media_type="text/event-stream",
+                headers=build_sse_headers(),
+            )
+        outcome = await service.run(task)
+        store_thread(response_id, task.messages, outcome.result.text)
+        payload = build_response_object(
+            task,
+            text=outcome.result.text,
+            tool_calls=outcome.result.tool_calls,
+            response_id=response_id,
+        )
+        return JSONResponse(payload)
+
+
+if config.DEBUG and config.ENABLE_DEBUG_DOM:
+
+    @app.get("/debug/dom")
+    async def debug_dom() -> Dict[str, Any]:
+        """仅在调试模式 + 显式开启时注册；只返回布尔/计数，不回显正文。"""
+        page = await service.driver.page_for(config.DEFAULT_SESSION_KEY)
+        groups = {
+            "input": config.INPUT_SELECTORS,
+            "send": config.SEND_BUTTON_SELECTORS,
+            "response": config.RESPONSE_SELECTORS,
+            "generating": config.GENERATING_SELECTORS,
+        }
+        detail, healthy = await service.driver.dom.selector_diagnostics(page, groups)
+        probe = await service.driver.dom.page_probe(page, config)
+        return {"selector_version": SELECTOR_VERSION, "selectors": detail, "healthy": healthy, "page": probe}
+
+
+# ==================== 流式实现 ====================
+
+_KEEPALIVE = 10.0
+
+
+async def _stream_chat_completion(
+    task: ChatTask, svc: ChatService, request: Request
+) -> AsyncIterator[str]:
+    """Chat Completions SSE：合成流 + 结束块 + ``[DONE]``（doc/design.md 3.5）。"""
+    encoder = StreamEncoder(task.model)
+    queue: "asyncio.Queue" = asyncio.Queue()
+    cancel = asyncio.Event()
+
+    async def on_delta(text: str) -> None:
+        await queue.put(("delta", text))
+
+    async def produce() -> None:
+        try:
+            outcome = await svc.run(
+                task, on_delta=on_delta, cancel=lambda: cancel.is_set()
+            )
+            await queue.put(("result", outcome))
+        except BridgeError as exc:
+            await queue.put(("error", exc))
+        except asyncio.CancelledError:  # pragma: no cover - 客户端断开
+            raise
+        except Exception as exc:  # noqa: BLE001
+            await queue.put(("error", NotReadyError("流式生成失败", detail={"error": type(exc).__name__})))
+        finally:
+            await queue.put(("end", None))
+
+    producer = asyncio.create_task(produce())
+    sent = ""
+    rewritten = False
+    try:
+        yield encoder.role()
+        while True:
+            if await request.is_disconnected():
+                cancel.set()
+                break
+            try:
+                kind, payload = await asyncio.wait_for(queue.get(), timeout=_KEEPALIVE)
+            except (asyncio.TimeoutError, TimeoutError):
+                yield sse_comment()
+                continue
+            if kind == "delta":
+                piece, reset = delta_piece(sent, payload)
+                if reset is not None:
+                    # 网页重写了回复：无法撤回已发送内容，停止继续发送，避免重复错误内容。
+                    rewritten = True
+                elif piece:
+                    sent = payload
+                    for chunk in encoder.content(piece):
+                        yield chunk
+            elif kind == "result":
+                outcome = payload
+                if outcome.result.has_tool_calls:
+                    for chunk in encoder.tool_calls(outcome.result.tool_calls):
+                        yield chunk
+                    yield encoder.final("tool_calls")
+                else:
+                    final = outcome.result.text
+                    if not rewritten:
+                        for chunk in encoder.content(final[len(sent):] if final.startswith(sent) else final):
+                            yield chunk
+                    yield encoder.final(outcome.result.finish_reason)
+                yield encoder.done()
+                return
+            elif kind == "error":
+                yield sse_error(payload.message, payload.code.value)
+                yield encoder.done()
+                return
+            elif kind == "end":
+                return
+    finally:
+        if not producer.done():
+            cancel.set()
+            try:
+                await asyncio.wait_for(producer, timeout=5)
+            except (asyncio.TimeoutError, TimeoutError, asyncio.CancelledError):
+                producer.cancel()
+
+
+async def _stream_responses(task: ChatTask, svc: ChatService, response_id: str) -> AsyncIterator[str]:
+    """Responses API 的简化流式：完成后再输出事件序列（仍是合法 SSE）。"""
+    outcome = await svc.run(task)
+    store_thread(response_id, task.messages, outcome.result.text)
+    for event in response_events(
+        response_id,
+        task.model,
+        text=outcome.result.text,
+        tool_calls=outcome.result.tool_calls,
+    ):
+        yield event
+
+
+__all__ = [
+    "app",
+    "chat_completions",
+    "diagnostics",
+    "healthz",
+    "list_models",
+    "lifespan",
+    "readiness",
+    "reset_session",
+    "root",
+    "_sanitize_key",
+    "_session_key",
+]

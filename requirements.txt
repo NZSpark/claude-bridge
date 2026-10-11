@@ -1,0 +1,10 @@
+fastapi
+uvicorn
+playwright
+pydantic
+
+# dev / test
+pytest
+httpx
+ruff
+openai
