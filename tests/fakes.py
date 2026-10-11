@@ -77,6 +77,8 @@ class FakePage:
         stop_control_plan: Optional[List[bool]] = None,
         url: str = "https://claude.ai/new",
         title_text: str = "Claude",
+        user_messages: Optional[List[str]] = None,
+        flat_reply_rows: Optional[int] = None,
     ) -> None:
         self.snapshots = snapshots if snapshots is not None else ["Hello from Claude"]
         self.generating_plan = generating_plan if generating_plan is not None else [False]
@@ -105,6 +107,12 @@ class FakePage:
         self.goto_calls: List[str] = []
         #: 最近一次 ``COMPLETE_TEXT_JS`` 的入参（用于断言外壳选择器确实传下去了）。
         self.last_complete_text_args: Any = None
+        #: 提交前页面上已有的用户消息（提交生效后会把本轮提示词追加在后面）。
+        self.user_messages: List[str] = list(user_messages or [])
+        #: ``None`` = 每轮回复各占一行（正常页面行为）；设为整数 = 页面复用 / 回收行，
+        #: assistant 节点条数**恒定**为该值（复现 2026-10-12 的 ``reply_not_found``：
+        #: 页面上明明已经有回复，条数却始终等于基线）。
+        self.flat_reply_rows = flat_reply_rows
 
     # ---- Playwright 接口子集 ----
     def is_closed(self) -> bool:
@@ -125,7 +133,9 @@ class FakePage:
         if self._is_input(selector):
             return [self.composer] if self.composer_available else []
         if self._is_response(selector):
-            return [FakeElement(text) for text in self._current_snapshots()]
+            return [FakeElement(text) for text in self._reply_rows()]
+        if self._is_user_message(selector):
+            return [FakeElement(text) for text in self._user_rows()]
         return []
 
     async def evaluate(self, expression: str, arg: Any = None) -> Any:
@@ -158,6 +168,22 @@ class FakePage:
             }
         if expression == selectors.BODY_TEXT_JS:
             return self.body_text
+        if expression == selectors.REPLY_STATE_JS:
+            opts = arg or {}
+            reply_rows = self._reply_rows()
+            user_rows = self._user_rows()
+            want_tail = bool(opts.get("want_tail"))
+            reply_selector = (opts.get("reply") or [None])[0]
+            user_selector = (opts.get("user") or [None])[0]
+            return {
+                "reply_selector": reply_selector if reply_rows or user_rows else None,
+                "reply_count": len(reply_rows),
+                "user_selector": user_selector if user_rows else None,
+                "user_count": len(user_rows),
+                # 假页面里回复总是排在最后一条提问之后（真实页面用文档顺序判定）。
+                "trailing_reply": bool(reply_rows) and bool(user_rows),
+                "last_user_tail": self._tail(user_rows[-1]) if (want_tail and user_rows) else None,
+            }
         if expression == selectors.COMPLETE_TEXT_JS:
             # 真实调用形态是 ``{"node": node, "chrome": [...]}``；也容忍直接传节点。
             node = arg.get("node") if isinstance(arg, dict) else arg
@@ -167,10 +193,33 @@ class FakePage:
 
     # ---- 内部 ----
     def _current_snapshots(self) -> List[str]:
-        if not self.submitted:
+        if not self.submitted or not self.snapshots:
             return []
         index = min(self.poll, len(self.snapshots) - 1)
         return [self.snapshots[index]]
+
+    def _reply_rows(self) -> List[str]:
+        """页面上当前的 assistant 节点。
+
+        ``flat_reply_rows`` 不为空时模拟「页面复用 / 回收行」：条数恒定，只有最后一行的
+        内容是本轮的（旧行被回收）——这正是条数口径失灵的现场。
+        """
+        rows = self._current_snapshots()
+        if self.flat_reply_rows is None:
+            return rows
+        pad = max(0, self.flat_reply_rows - len(rows))
+        return ["(旧回复)"] * pad + rows
+
+    def _user_rows(self) -> List[str]:
+        """页面上当前的用户消息；提交生效后本轮提示词也在其中。"""
+        rows = list(self.user_messages)
+        if self.submitted and self.filled_texts:
+            rows.append(self.filled_texts[-1])
+        return rows
+
+    @staticmethod
+    def _tail(text: str) -> str:
+        return " ".join(str(text).split())[-200:]
 
     def _generating_now(self) -> Optional[bool]:
         if not self.submitted:
@@ -192,6 +241,10 @@ class FakePage:
     @staticmethod
     def _is_response(selector: str) -> bool:
         return "assistant" in selector or "claude-message" in selector
+
+    @staticmethod
+    def _is_user_message(selector: str) -> bool:
+        return "user-message" in selector or '="user"' in selector
 
 
 class VirtualClock:

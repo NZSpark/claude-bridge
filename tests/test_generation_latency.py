@@ -69,8 +69,16 @@ def test_idle_polling_keeps_stall_window_in_wall_clock(
     """静止期用基础间隔：停滞窗口仍是 STALL_S 秒，不因轮询变快而缩短。"""
     monkeypatch.setattr(config, "MAX_UPSTREAM_RETRIES", 0)
     page = FakePage(snapshots=[], generating_plan=[False])
-    with pytest.raises(ReplyNotFoundError):
+    with pytest.raises(ReplyNotFoundError) as excinfo:
         asyncio.run(ReplyGenerator().generate(page, "hi"))
+    # 失败详情要留下当时的条数现场：下次出这种事能直接从错误 / 日志里看出是「条数口径」
+    # 失灵还是页面真的没回（doc/design.md 4.4）。
+    assert excinfo.value.detail["reply_count"] == 0
+    assert excinfo.value.detail["reply_baseline"] == 0
+    # 页面确实收到了本轮提问（提问条数 0→1），但始终没有 assistant 节点：
+    # ``trailing_reply`` 为 False 就是它与「条数口径失灵」（已被结构信号救回）的区别。
+    assert excinfo.value.detail["user_count"] == 1
+    assert excinfo.value.detail["trailing_reply"] is False
     assert 30.0 <= clock.total <= 32.0
     # 静止以后不应再出现「活跃间隔」。
     assert all(interval == pytest.approx(1.5) for interval in clock.intervals[1:])
