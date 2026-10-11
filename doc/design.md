@@ -195,6 +195,22 @@ Chat Completions 流式协议要求：
 
 当所有选择器均失败时，应返回诸如 `composer_not_found` 或 `reply_extraction_failed` 的内部错误类型，并在诊断信息中列出选择器命中情况。除非调试模式开启，不能默认保存或打印包含会话正文的完整 DOM。
 
+**挡路弹窗（额度用尽 / 升级提示）要主动关掉（2026-10-12 事故）。** 额度用尽后站点会弹出
+`role="dialog"` 的「Upgrade to keep chatting / You hit your 5-hour message limit」对话框。它盖住
+输入区并抢走焦点，于是提示词**写得进 DOM、Enter 却不生效**、回复也不出现——桥接先报
+`prompt_submission_failed`（「提交未生效」），或静止满 `STALL_S` 后报 `generation_stalled`
+（「生成停滞」），而真正的原因是额度没了。处理约定：
+
+- 探测与点击分开：JS 只做「可见容器 + 命中配置文案」的判定，并在挑中的**关闭类**控件上打标记；
+  Python 侧再用真实点击去关（`MODAL_PROBE_JS` + `MODAL_MARKER_ATTR`）。
+- 只点关闭 / 先不用类控件（`MODAL_CLOSE_SELECTORS` / `MODAL_CLOSE_TEXT_PATTERNS`），
+  **绝不**点升级、购买、订阅等任何按钮；关不掉时退化到 `Escape`，仍关不掉只记日志，
+  不让「关不掉弹窗」本身变成请求失败。
+- 触发点：提交前关一次（生成链路每轮），以及**即将判定失败时**再探一次（只做一次，与
+  「会话到顶」扫描同一处）。另外提供 `/bridge modal` 手动入口。
+- 归因：只要本轮见到过这个弹窗、且本轮确实没生成，就报 `usage_limit_reached`（HTTP 429）
+  而不是停滞 / 提交失败——重试同一个请求没有意义，应等额度重置或升级。
+
 ### 4.4 输入和回复提取
 
 输入层独立处理文本填充、焦点、发送以及提交结果确认。对超长提示词，应采用经过验证的输入方式并检查最终输入文本，而不是默认一次粘贴必然成功。
@@ -508,6 +524,7 @@ ClaudeBridge/
 - `generation_timeout`：本轮超过绝对超时。
 - `generation_stalled`：正文长时间没有有效增长且不能确认正常完成。
 - `context_limit_reached`：观察到可识别的上下文限制提示。
+- `usage_limit_reached`：网页账号额度已用尽（页面弹出升级 / 额度提示），本轮无法生成。
 - `session_conflict`：绑定或页面状态与预期不一致。
 - `session_busy`：桶锁等待超时。
 - `tool_call_parse_error`：工具调用输出解析失败。

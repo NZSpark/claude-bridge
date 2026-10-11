@@ -11,12 +11,15 @@
 | `/bridge help [session]` | 命令列表 / 分主题帮助 | 只读 |
 | `/bridge status` | 桥接、浏览器与当前桶的状态摘要 | 只读 |
 | `/bridge models` | 本桥公布的模型名（与 `GET /v1/models` 同源） | 只读 |
+| `/bridge modal` | 关闭挡路的额度 / 升级弹窗（只点关闭类控件） | 改页面 |
 | `/bridge session [status]` | 当前桶的会话状态摘要 | 只读 |
 | `/bridge session reset` | 下一轮开新网页会话并播种完整历史 | 改状态 |
 | `/bridge session link <URL> [--seed]` | 把当前桶绑定到指定网页会话 | 改状态 |
 | `/bridge session unlink` | 解除当前桶的会话绑定 | 改状态 |
 
-- 裸 `/bridge` 等于 `/bridge help`。
+- 裸 `/bridge` 等于 `/bridge help`；`/bridge popup` 是 `/bridge modal` 的别名。
+- `/bridge modal` 只点**关闭 / 先不用**类控件，不点升级或付费按钮，也不改会话状态；
+  它回答「页面上到底有没有这个弹窗」，而生成链路每轮开始本来就会自己关一次。
 - `link` / `unlink` / `reset` 可以省略 `session` 直接写（`/bridge link <URL>`）。
 - `--seed` 表示「那条会话里没有此前记录」，下一轮把完整历史播种进去。
 - 会话地址可只发 **会话 ID**（`/bridge link 5a39cd68-…`），桥会补成

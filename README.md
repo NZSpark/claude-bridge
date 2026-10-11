@@ -205,6 +205,9 @@ CLAUDE_E2E=1 .venv/bin/python -m pytest tests/e2e -q   # 真实浏览器 E2E（�
 - 流式是**合成流**（轮询页面回复快照做增量），不是上游 token 级流；若网页在流式中
   重写回复，桥接层无法撤回已发送内容，会停止继续发送而不是重复错误内容。
 - 模型别名只有经真实探测确认映射的才会公开；默认只公布 `claude-web`。
+- 额度用尽 / 升级弹窗的关闭依赖站点当前的弹窗结构（容器 `role="dialog"` + 关闭控件）；
+  改版后若关不掉，日志里会有 `[弹窗] 额度/升级弹窗仍然在页面上`，把新控件加进
+  `MODAL_CLOSE_SELECTORS` / `MODAL_CLOSE_TEXT_PATTERNS` 即可（无需改代码）。
 
 ## 故障排查
 
@@ -236,5 +239,10 @@ CLAUDE_E2E=1 .venv/bin/python -m pytest tests/e2e -q   # 真实浏览器 E2E（�
   （**包括用户消息**）与输入区。若你确实把这类文字（例如本仓库 `.env.example` 的那一行）
   发进了会话，旧版本会对每个请求误报——升级后正常；如果你想更严，把
   `CONTEXT_LIMIT_PATTERNS` 收窄成只属于站点提示的句子。
+- **弹出了「Upgrade to keep chatting / You hit your 5-hour message limit」之类的额度弹窗**：
+  这是网页账号的用量额度用尽。桥接会在每轮提交前自动把它关掉（只点关闭 / 先不用类控件，
+  绝不点升级或付费按钮），所以它不会再把「提示词写得进、Enter 不生效」伪装成
+  `prompt_submission_failed` / `generation_stalled`；现在会直接回 `usage_limit_reached`
+  （HTTP 429）。想手动关一次：在对话里发 `/bridge modal`。真要用就等额度重置或升级。
 - **`challenge_required`**：在普通浏览器里先完成一次人工验证；本项目**不**自动绕过验证。
   若页面其实可用（能打字），只会记为 `challenge_suspect` 诊断提示，不阻断请求。
