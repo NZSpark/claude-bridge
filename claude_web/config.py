@@ -208,6 +208,18 @@ BUCKET_IDLE_TTL_S = env_float("BUCKET_IDLE_TTL_S", 900.0)
 MAX_SESSION_STATE_CACHE = env_int("MAX_SESSION_STATE_CACHE", 64)
 NEW_SESSION_ON_START = env_bool("CLAUDE_NEW_SESSION")
 TOOL_RESULT_MAX_CHARS = env_int("TOOL_RESULT_MAX_CHARS", 20000)
+#: 播种 prompt 里的「环境说明」：告诉模型本机就是工作目录，不必向用户索要地址 /
+#: 让用户手动执行（参考 chatgpt-bridge 的 SEED_ENV_NOTE）。
+SEED_ENV_NOTE = env_str(
+    "SEED_ENV_NOTE",
+    "[环境说明] 项目就在本机的当前工作目录里，你可以直接下命令（如 git status / "
+    "git add / git commit / git log / ls / cat）来完成查看与修改，"
+    "无需向用户索要仓库地址，也无需用户手动执行。",
+)
+#: 工具说明里是否输出每个工具的完整 JSON Schema（默认 false = 紧凑的 name(必填参数) 形态）。
+TOOLS_INSTRUCTION_VERBOSE = env_bool("TOOLS_INSTRUCTION_VERBOSE")
+#: 工具说明里单条描述的最大字符数（0 = 不限制）。
+TOOLS_DESC_MAX_CHARS = env_int("TOOLS_DESC_MAX_CHARS", 200)
 #: 默认会话桶键。
 DEFAULT_SESSION_KEY = "default"
 

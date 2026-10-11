@@ -1,0 +1,41 @@
+# Python
+.freebuff/
+
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+build/
+dist/
+*.egg-info/
+.eggs/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Browser profiles (contain login cookies / session state; never commit)
+user_data/
+user_data*/
+
+# Session state, task snapshots and generated output (may contain private data)
+output/
+*.state
+.state/
+
+# Local config (may contain environment-specific paths / tokens)
+.env
+
+# Local tooling
+.freebuff/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp

@@ -51,18 +51,46 @@ def test_system_prefix_is_marked_and_budgeted(monkeypatch):
     monkeypatch.setattr(config, "SYSTEM_MAX_CHARS", 40)
     normalized = normalize_messages(_msgs(("system", "x" * 200), ("user", "hi")))
     build = build_prompt(normalized)
-    assert "[system]" in build.text
+    assert "[系统指令]" in build.text
     assert "截断" in build.text
 
 
 def test_build_prompt_keeps_message_order_and_marks_roles():
     normalized = normalize_messages(_msgs(("system", "S"), ("user", "u1"), ("assistant", "a1"), ("user", "u2")))
     build = build_prompt(normalized)
-    assert build.text.index("[user]") < build.text.index("[assistant]")
+    # 对话口吻的角色标签：用户消息不加标记，AI 历史回复标为 [你之前的回复]
+    assert build.text.index("u1") < build.text.index("[你之前的回复]")
+    assert "[user]" not in build.text
+    # 播种头部必须存在且说明「据此继续、不要复述」
+    assert "[上下文重建]" in build.text
+    assert "不要复述历史" in build.text
     # 最后一条 user 必须保留
     assert "u2" in build.text
     assert build.included_messages == 3
     assert build.truncated is False
+    assert "已省略" not in build.text
+
+
+def test_truncated_history_is_announced_in_visible_text(monkeypatch):
+    """裁剪必须写进**可见正文**：模型看不到 notes，会把被裁掉的历史当成本来就没有。"""
+    monkeypatch.setattr(config, "CLAUDE_MAX_CONTEXT_CHARS", 120)
+    normalized = normalize_messages(
+        _msgs(("user", "A" * 200), ("assistant", "B" * 200), ("user", "CURRENT-QUESTION"))
+    )
+    build = build_prompt(normalized)
+    assert build.truncated is True
+    assert "已省略" in build.text
+    # 说明必须出现在历史正文之前（紧跟播种头部）
+    assert build.text.index("已省略") < build.text.index("CURRENT-QUESTION")
+
+
+def test_tool_result_label_carries_call_id():
+    normalized = normalize_messages(
+        [ChatMessage(role="tool", content="result-body", tool_call_id="call_abc123")]
+    )
+    build = build_prompt(normalized)
+    assert "[工具执行结果 call_abc123]" in build.text
+    assert "result-body" in build.text
 
 
 def test_build_prompt_truncates_history_but_keeps_last_user(monkeypatch):
@@ -87,12 +115,105 @@ def test_tool_result_is_truncated(monkeypatch):
     assert "工具结果已截断" in build.text
 
 
-def test_tools_instruction_injected():
+def test_empty_tool_result_is_explained_not_passed_through():
+    """空输出必须显式说明（否则模型以为命令没生效，会把同一条命令反复重发）。"""
+    normalized = normalize_messages(_msgs(("tool", "$ git status --short\n(no output)\nTook 0.0s")))
+    build = build_prompt(normalized)
+    assert "没有任何输出" in build.text
+    assert "(no output)" not in build.text
+
+
+def test_non_empty_tool_result_is_preserved_verbatim():
+    """任何含真实内容的输出必须逐字节保留（edit 工具的 oldText 依赖它）。"""
+    body = "line1\n\n  indented\n\tTabbed\n"
+    normalized = normalize_messages([ChatMessage(role="tool", content=body)])
+    build = build_prompt(normalized)
+    assert body.rstrip("\n") in build.text
+
+
+def test_repeated_empty_call_gets_named_hint():
+    """同一命令反复发出且每次空输出时，末尾点名提醒（打断死循环）。"""
+    messages = [
+        ChatMessage(role="user", content="看看工作区状态"),
+        ChatMessage(
+            role="assistant",
+            content="",
+            tool_calls=[
+                {
+                    "id": "call_a",
+                    "function": {"name": "bash", "arguments": '{"command": "git status"}'},
+                }
+            ],
+        ),
+        ChatMessage(role="tool", content="(no output)", tool_call_id="call_a"),
+        ChatMessage(
+            role="assistant",
+            content="",
+            tool_calls=[
+                {
+                    "id": "call_b",
+                    "function": {"name": "bash", "arguments": '{"command": "git status"}'},
+                }
+            ],
+        ),
+        ChatMessage(role="tool", content="Took 0.0s", tool_call_id="call_b"),
+    ]
+    build = build_prompt(normalize_messages(messages))
+    assert "[Repeated Empty Tool Call]" in build.text
+    assert "infinite loop" in build.text
+
+
+def test_first_empty_call_is_not_flagged_as_repeat():
+    messages = [
+        ChatMessage(role="user", content="看看工作区状态"),
+        ChatMessage(
+            role="assistant",
+            content="",
+            tool_calls=[
+                {
+                    "id": "call_a",
+                    "function": {"name": "bash", "arguments": '{"command": "git status"}'},
+                }
+            ],
+        ),
+        ChatMessage(role="tool", content="(no output)", tool_call_id="call_a"),
+    ]
+    build = build_prompt(normalize_messages(messages))
+    assert "[Repeated Empty Tool Call]" not in build.text
+
+
+def test_tools_instruction_injected_and_placed_next_to_the_task():
+    """工具说明按 chatgpt-bridge 的实测结论**紧贴本轮任务**，而不是堆在末尾。"""
     tools = [ToolSpec(name="read_file", description="read", parameters={"required": ["path"]})]
-    normalized = normalize_messages(_msgs(("user", "hi")))
+    normalized = normalize_messages(
+        _msgs(("user", "旧请求"), ("assistant", "旧回复"), ("user", "本轮任务"))
+    )
     build = build_prompt(normalized, tools=tools)
-    assert "[工具调用协议]" in build.text
-    assert "read_file" in build.text
+    assert "[Tool Calling Instructions]" in build.text
+    assert "read_file(path)" in build.text
+    # 说明必须出现在**本轮任务之前**、旧历史之后
+    assert build.text.index("[Tool Calling Instructions]") < build.text.index("本轮任务")
+    assert build.text.index("旧请求") < build.text.index("[Tool Calling Instructions]")
+    # 新会话还要带一份格式强调块（新桶最容易无视工具）
+    assert "[Output Format Emphasis]" in build.text
+
+
+def test_tools_instruction_not_duplicated_when_already_present():
+    """客户端已内联同一份说明时不重复注入，避免两份说明互相干扰。"""
+    from claude_web.toolcalls import TOOLCALL_HEADER
+
+    tools = [ToolSpec(name="read_file", description="read", parameters={})]
+    normalized = normalize_messages(
+        _msgs(("user", f"{TOOLCALL_HEADER} 客户端已附说明"))
+    )
+    build = build_prompt(normalized, tools=tools)
+    assert build.text.count(TOOLCALL_HEADER) == 1
+
+
+def test_seed_env_note_is_injected(monkeypatch):
+    monkeypatch.setattr(config, "SEED_ENV_NOTE", "[环境说明] 项目就在本机。")
+    build = build_prompt(normalize_messages(_msgs(("user", "hi"))))
+    assert "[环境说明] 项目就在本机。" in build.text
 
 
 def test_normalize_tools_handles_nested_and_flat():

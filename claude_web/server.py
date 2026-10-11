@@ -30,6 +30,7 @@ from .api.responses_adapter import (
     to_task_from_responses,
 )
 from .api.streaming_adapter import sse_comment, sse_error
+from .bridge_commands import handle_command
 from .browser.selectors import SELECTOR_VERSION
 from .errors import (
     BridgeError,
@@ -283,6 +284,18 @@ async def chat_completions(request: Request):
                 "请求字段校验失败", detail={"errors": exc.error_count()}
             ) from exc
         task = to_task(parsed, bucket)
+        # 桥内命令（/bridge ...）：本地应答，**不**发给网页版，因此浏览器没起来也能用。
+        command_reply = await handle_command(parsed.messages, service, bucket)
+        if command_reply is not None:
+            if parsed.stream:
+                return StreamingResponse(
+                    _stream_bridge_reply(task, command_reply),
+                    media_type="text/event-stream",
+                    headers=build_sse_headers(),
+                )
+            return JSONResponse(
+                build_completion_response(task, text=command_reply, finish_reason="stop").model_dump()
+            )
         if parsed.stream:
             return StreamingResponse(
                 _stream_chat_completion(task, service, request),
@@ -310,6 +323,18 @@ async def responses(request: Request):
     with log_context(session_key=redact(bucket)):
         task = to_task_from_responses(body, bucket)
         response_id = f"resp_{new_request_id().replace('-', '')}"
+        # 与 Chat Completions 同一套命令，避免两条协议行为分叉。
+        command_reply = await handle_command(task.messages, service, bucket)
+        if command_reply is not None:
+            if task.stream:
+                return StreamingResponse(
+                    _stream_bridge_responses(task, command_reply, response_id),
+                    media_type="text/event-stream",
+                    headers=build_sse_headers(),
+                )
+            return JSONResponse(
+                build_response_object(task, text=command_reply, response_id=response_id)
+            )
         if task.stream:
             return StreamingResponse(
                 _stream_responses(task, service, response_id),
@@ -347,6 +372,16 @@ if config.DEBUG and config.ENABLE_DEBUG_DOM:
 # ==================== 流式实现 ====================
 
 _KEEPALIVE = 10.0
+
+
+async def _stream_bridge_reply(task: ChatTask, reply: str) -> AsyncIterator[str]:
+    """桥内命令的本地 SSE：没有上游生成，直接一次性吐出应答。"""
+    encoder = StreamEncoder(task.model)
+    yield encoder.role()
+    for chunk in encoder.content(reply):
+        yield chunk
+    yield encoder.final("stop")
+    yield encoder.done()
 
 
 async def _stream_chat_completion(
@@ -425,6 +460,14 @@ async def _stream_chat_completion(
                 await asyncio.wait_for(producer, timeout=5)
             except (asyncio.TimeoutError, TimeoutError, asyncio.CancelledError):
                 producer.cancel()
+
+
+async def _stream_bridge_responses(
+    task: ChatTask, reply: str, response_id: str
+) -> AsyncIterator[str]:
+    """桥内命令在 Responses 协议下的本地事件序列（不触发上游生成）。"""
+    for event in response_events(response_id, task.model, text=reply):
+        yield event
 
 
 async def _stream_responses(task: ChatTask, svc: ChatService, response_id: str) -> AsyncIterator[str]:

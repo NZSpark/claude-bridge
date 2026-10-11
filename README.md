@@ -23,6 +23,7 @@ E2E 方案见 [doc/e2e_test_design.md](doc/e2e_test_design.md)。
 | `GET /healthz` `GET /readiness` | 区分「进程活着」与「浏览器+登录+输入区就绪」 |
 | `GET /metrics` `GET /diagnostics` | 计数、耗时、错误类别、选择器命中；**不返回正文** |
 | `POST /session/reset` `/session/link` `/session/unlink` | 会话管理 |
+| `/bridge ...` 聊天命令 | 在对话里查状态 / 绑定会话；由桥**本地应答**，不发给网页版（见 [doc/bridge_commands.md](doc/bridge_commands.md)） |
 | `POST /v1/responses` | Responses API 兼容子集，默认关闭（`ENABLE_RESPONSES_API`） |
 
 **明确不支持**（不伪装成已实现）：图片 / 音频 / 文件附件、Artifacts、扩展思考、
@@ -119,6 +120,26 @@ curl http://127.0.0.1:8003/v1/chat/completions \
 
 OpenAI SDK / Pi / Codex 只需把 `base_url` 指向 `http://127.0.0.1:8003/v1`，
 `api_key` 随便填（未启用 `BRIDGE_TOKEN` 时不校验）。
+
+### 在对话里管理桥（`/bridge` 命令）
+
+把命令**单独**作为一条 `user` 消息发过去，桥就自己回答，不会转发给 Claude 网页版
+（所以页面失效、浏览器没起来时这些命令依然可用）：
+
+```bash
+curl http://127.0.0.1:8003/v1/chat/completions -H 'Content-Type: application/json' \
+  -d '{"messages":[{"role":"user","content":"/bridge help"}]}'
+
+# 把当前桶绑定到一条已有会话（也可以只发会话 ID）
+curl http://127.0.0.1:8003/v1/chat/completions -H 'Content-Type: application/json' \
+  -H 'X-Claude-Session: pi-task-1' \
+  -d '{"messages":[{"role":"user","content":"/bridge link https://claude.ai/chat/<会话 ID>"}]}'
+```
+
+可用命令：`help`、`status`、`models`、`session [status]`、`session reset`、
+`session link <URL> [--seed]`、`session unlink`（`link` / `unlink` / `reset` 可省略
+`session` 直接写）。只有「整条消息就是那一行」才算命令 —— 正文里提到 `/bridge` 照样
+发给网页版。完整语义见 [doc/bridge_commands.md](doc/bridge_commands.md)。
 
 ## 配置
 

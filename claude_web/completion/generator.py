@@ -30,7 +30,7 @@ from ..errors import (
     ReplyNotFoundError,
 )
 from ..models import ToolCall, ToolSpec
-from ..toolcalls import ParsedToolCalls, parse_tool_calls
+from ..toolcalls import ParsedToolCalls, parse_tool_calls, strip_tool_call_blocks
 from .extractor import ReplyExtractor, normalize_reply
 
 logger = logging.getLogger(__name__)
@@ -61,11 +61,12 @@ class GenerationResult:
 
 
 def _strip_tool_fences(text: str, fence: str) -> str:
-    """去掉承载工具调用的围栏，保留其余正文。"""
-    import re
+    """去掉承载工具调用的块，保留其余正文。
 
-    pattern = re.compile(rf"```[ \t]*{re.escape(fence)}[ \t]*\r?\n.*?```", re.DOTALL | re.IGNORECASE)
-    return pattern.sub("", text).strip()
+    包含围栏与**无围栏**（DOM 吃掉 ```）两种形态，见
+    :func:`claude_web.toolcalls.strip_tool_call_blocks`。
+    """
+    return strip_tool_call_blocks(text, fence=fence)
 
 
 class ReplyGenerator:

@@ -171,6 +171,14 @@ class ClaudeWebDriver:
     def started(self) -> bool:
         return self._started and self._context is not None
 
+    @property
+    def start_error(self) -> Optional[str]:
+        """浏览器初始化失败的摘要（异常类型名）；未失败时为 ``None``。
+
+        供 ``/bridge status`` 这类只读诊断读取：它们不该为了报状态而真的打开页面。
+        """
+        return self._start_error
+
     async def start(self) -> None:
         """启动浏览器，或通过本机 CDP 端口连接到用户启动的 Chrome（幂等）。"""
         global async_playwright

@@ -4,13 +4,18 @@
 转写成 Claude 网页输入框可提交的文本，因此这里必须：
 
 * 把 ``system`` / ``developer`` 归一化为**显式标记的前缀**（不声称 API 原生语义）；
-* 明确标记每条消息的角色边界（``[user]`` / ``[assistant]`` / ``[tool result]``）；
+* 标记每条消息的角色边界（``[系统指令]`` / ``[你之前的回复]`` / ``[工具执行结果]``）；
 * 在独立字符预算内裁剪历史（优先保留当前任务与最新轮次，且绝不丢弃最后一条 user 消息）。
+
+角色标签刻意采用**对话口吻而非对称标记**（参考 ``deepseek-bridge`` 的 prompting.py）：
+用户说的话原样给出、不套 ``[user]``，模型自己的历史回复标为 ``[你之前的回复]``。
+这更接近模型在网页对话界面里习惯的语境，也减少它把标记当成待复述内容的概率。
 """
 
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field
 from typing import Any, List, Optional, Sequence, Tuple
 
@@ -24,17 +29,149 @@ _INTERNAL_ROLES = ("system", "user", "assistant", "tool")
 #: 允许的文本内容分片类型（其余一律按不支持处理）。
 _TEXT_PART_TYPES = {"text", "input_text", "output_text"}
 
+#: 工具结果标签模板（``call_id`` 占位符带前导空格）；缺失时退化为 ``[工具执行结果]``。
+_TOOL_LABEL = "[工具执行结果{call_id}]"
+
+#: 角色标签（``user`` 为空 = 原样给出，不加任何标记）。
 _ROLE_MARKERS = {
-    "system": "[system]",
-    "user": "[user]",
-    "assistant": "[assistant]",
-    "tool": "[tool result]",
+    "system": "[系统指令]",
+    "user": "",
+    "assistant": "[你之前的回复]",
+    "tool": _TOOL_LABEL.format(call_id=""),
 }
 
+#: 播种头部（``deepseek-bridge`` 的「上下文重建」风格）。
+#:
+#: 不用「这是一个新会话」的措辞：``/session/link`` 绑定既有会话时同样是播种。
 _PREAMBLE = (
-    "[桥接说明] 下面是一段对话历史的完整重放（由本地桥接层从 API 请求重建）。"
-    "请把它视为已经发生的上下文，不要复述历史，直接针对最后一条 [user] 消息作答。"
+    "[上下文重建] 下面是本任务此前的对话记录（由本地桥接层从 API 请求重建）。"
+    "请把它当作已经发生的上下文，据此继续，不要从头重做，不要复述历史，"
+    "直接回答最后一条用户消息。"
 )
+
+#: 历史被裁剪时插入到可见正文里的省略说明。
+#:
+#: 只写进 :class:`PromptBuild.notes` 是不够的：模型看不到 notes，会把被裁掉的历史
+#: 当成「本来就没有」，于是默默重做已完成的工作。
+#: 历史被裁剪时插入到可见正文里的省略说明。
+#:
+#: 只写进 :class:`PromptBuild.notes` 是不够的：模型看不到 notes，会把被裁掉的历史
+#: 当成「本来就没有」，于是默默重做已完成的工作。
+_OMISSION_NOTE = "（更早的对话因长度限制已省略，如需请向我确认。）"
+
+#: 播种头部的标题（与去重判定共用同一份常量）。
+CONTEXT_REBUILD_HEADER = "[上下文重建]"
+ENV_NOTE_HEADER = "[环境说明]"
+
+#: 工具结果「命令执行完成但没有任何输出」时的替代文本。
+#:
+#: 背景（chatgpt-bridge 的用户实测死循环）：客户端把空 stdout 渲染成 ``(no output)`` /
+#: ``Took 0.0s``，模型把它理解成「命令没生效」，于是把**同一条命令原样再发一遍**，
+#: 客户端再执行一次、又是一样的空输出——死循环。因此空输出必须被显式说明，
+#: 而不是把 ``(no output)`` 原样交给模型。
+EMPTY_TOOL_RESULT_NOTE = (
+    "（本命令已执行完毕、退出正常，但**没有任何输出**：空输出是有效的正常结果，"
+    "既不是失败，也不代表工具异常或命令未生效。）\n"
+    "请直接给出**下一条指令**或最终结论；不要重复执行同一条命令——"
+    "同样的命令只会再次得到空输出。若确实需要看到内容，请换一条会打印状态的命令。"
+)
+
+#: 空输出的等价写法（均为括号 / 尖括号包裹形式，避免把真实输出里的普通句子误判）。
+_EMPTY_TOOL_OUTPUT_MARKERS = (
+    "(no output)",
+    "(no stdout)",
+    "(empty output)",
+    "(empty)",
+    "(no output produced)",
+    "(空输出)",
+    "(无输出)",
+    "<no output>",
+    "[no output]",
+)
+
+#: 客户端外壳行：命令回显、耗时、退出码、token 统计、空 ``Output:`` 块、分隔线。
+_TOOL_CHROME_RES = (
+    re.compile(r"^took\s+[\d.]+\s*s$", re.IGNORECASE),
+    re.compile(r"^wall time:\s*\S.*$", re.IGNORECASE),
+    re.compile(r"^chunk id:\s*\S+$", re.IGNORECASE),
+    re.compile(r"^process exited with code\s+\d+$", re.IGNORECASE),
+    re.compile(r"^original token count:\s*\d+$", re.IGNORECASE),
+    re.compile(r"^output:\s*$", re.IGNORECASE),
+    re.compile(r"^[-=_*~#]{3,}$"),
+)
+#: 命令回显（``$ git status --short``）：只在**首行**识别，避免误判以 ``$`` 开头的输出。
+_TOOL_ECHO_RE = re.compile(r"^\$\s+\S.*$")
+
+
+def _is_tool_chrome_or_marker(line: str) -> bool:
+    if line.lower() in _EMPTY_TOOL_OUTPUT_MARKERS:
+        return True
+    return any(pattern.match(line) for pattern in _TOOL_CHROME_RES)
+
+
+def _is_empty_tool_output(raw: str) -> bool:
+    """工具结果是否等价于「命令执行完成，但确实没有任何输出」。
+
+    去掉外壳行（命令回显 / 耗时 / 退出码 / token 统计 / 分隔线）与空标记后是否什么都不剩。
+    这样 ``git status --short``（工作区干净）与空白内容都算空，而任何含真实内容的输出
+    仍逐字节保留——Pi / Codex 的 read 结果会原样作为 edit 工具的 oldText。
+    """
+    text = (raw or "").replace("\r\n", "\n").strip()
+    if not text:
+        return True
+    lines = [line.strip() for line in text.split("\n")]
+    lines = [line for line in lines if line]
+    if lines and _TOOL_ECHO_RE.match(lines[0]):
+        lines = lines[1:]
+    return all(_is_tool_chrome_or_marker(line) for line in lines)
+
+
+def _tool_call_signature(call: Any) -> str:
+    """把一条 assistant 工具调用归一化成「命令签名」（用于识别重复调用）。"""
+    if isinstance(call, dict):
+        name = call.get("name")
+        args = call.get("arguments")
+    else:  # pydantic ToolCall
+        fn = getattr(call, "function", None)
+        name = getattr(fn, "name", None)
+        args = getattr(fn, "arguments", None)
+    if not name:
+        return ""
+    if isinstance(args, str):
+        try:
+            args = json.dumps(json.loads(args), ensure_ascii=False, sort_keys=True)
+        except (TypeError, ValueError):
+            pass
+    elif isinstance(args, (dict, list)):
+        args = json.dumps(args, ensure_ascii=False, sort_keys=True)
+    return f"{name}|{args if args is not None else ''}"
+
+
+def _repeated_empty_calls(
+    messages: Sequence[NormalizedMessage], empty_call_ids: Sequence[Optional[str]]
+) -> List[tuple]:
+    """找出「同一命令已调用 ≥2 次」且本轮结果为空的那几条，返回 ``[(签名, 次数)]``。"""
+    signature_of: dict = {}
+    counts: dict = {}
+    for message in messages:
+        for call in message.tool_calls or []:
+            signature = _tool_call_signature(call)
+            if not signature:
+                continue
+            counts[signature] = counts.get(signature, 0) + 1
+            call_id = call.get("id") if isinstance(call, dict) else getattr(call, "id", None)
+            if call_id:
+                signature_of[str(call_id)] = signature
+    out: List[tuple] = []
+    for call_id in empty_call_ids:
+        if not call_id:
+            continue
+        matched = signature_of.get(str(call_id))
+        if matched and counts.get(matched, 0) >= 2:
+            pair = (matched, counts[matched])
+            if pair not in out:
+                out.append(pair)
+    return out
 
 
 def content_to_text(content: Any) -> str:
@@ -144,16 +281,26 @@ def estimate_tokens(text: str) -> int:
 
 
 def _render_message(message: NormalizedMessage) -> str:
-    marker = _ROLE_MARKERS.get(message.role, f"[{message.role}]")
+    marker = _ROLE_MARKERS.get(message.role)
+    if marker is None:
+        marker = f"[{message.role}]"
     body = message.content or ""
     if message.role == "assistant" and message.tool_calls:
         calls = json.dumps(message.tool_calls, ensure_ascii=False)
         body = (body + "\n" if body else "") + f"[发起工具调用] {calls}"
     if message.role == "tool":
-        limit = config.TOOL_RESULT_MAX_CHARS
-        if limit and len(body) > limit:
-            body = body[:limit] + f"\n…（工具结果已截断，原长 {len(body)} 字符）"
-    return f"{marker}\n{body}"
+        # 空输出必须**显式**说明，否则模型会以为命令没生效而反复重发同一条命令。
+        if _is_empty_tool_output(body):
+            body = EMPTY_TOOL_RESULT_NOTE
+        else:
+            limit = config.TOOL_RESULT_MAX_CHARS
+            if limit and len(body) > limit:
+                body = body[:limit] + f"\n…（工具结果已截断，原长 {len(body)} 字符）"
+        # 带上 call id，模型才能把结果对回到具体的那次调用（参考 deepseek-bridge）。
+        marker = _TOOL_LABEL.format(
+            call_id=f" {message.tool_call_id}" if message.tool_call_id else ""
+        )
+    return f"{marker}\n{body}" if marker else body
 
 
 @dataclass
@@ -180,27 +327,40 @@ def build_prompt(
     预算策略（doc/design.md 5.3）：先扣除 system 前缀与工具说明，再从最新往最旧
     累加历史；**最后一条 user 消息永远完整保留**，即使因此超出预算（并在 notes 里标注）。
     """
-    system_text = extract_system_text(messages)
-    tool_text = ""
-    if tools:
-        from .toolcalls import format_tools_instruction
+    from .toolcalls import (
+        TOOLCALL_HEADER,
+        format_repeat_call_hint,
+        format_tool_call_emphasis,
+        format_tools_instruction,
+    )
 
+    system_text = extract_system_text(messages)
+    inbound = "\n".join(
+        [system_text] + [_render_message(m) for m in messages if m.role != "system"]
+    )
+    tool_text = ""
+    # 去重只看**入站消息**：客户端可能已内联一份说明，再追加一份会互相干扰。
+    if tools and TOOLCALL_HEADER not in inbound:
         tool_text = format_tools_instruction(tools)
+    # 新会话 / 重置后的第一轮：把格式强调再放一次（模型最容易在这时候无视工具）。
+    emphasis = format_tool_call_emphasis(tools) if (tool_text and include_preamble) else ""
 
     budget = config.CLAUDE_MAX_CONTEXT_CHARS
     fixed_parts: List[str] = []
     if include_preamble:
         fixed_parts.append(_PREAMBLE)
+    if emphasis:
+        fixed_parts.append(emphasis)
+    if include_preamble and config.SEED_ENV_NOTE:
+        fixed_parts.append(config.SEED_ENV_NOTE)
     if system_text:
         fixed_parts.append(_ROLE_MARKERS["system"] + "\n" + system_text)
     fixed = "\n\n".join(fixed_parts)
-    trailer_parts: List[str] = []
-    if tool_text:
-        trailer_parts.append(tool_text)
-    trailer_parts.extend(extra_sections or [])
+    trailer_parts: List[str] = list(extra_sections or [])
     trailer = "\n\n".join(trailer_parts)
 
-    reserved = len(fixed) + len(trailer) + 2
+    # 工具说明现在插在正文**内部**（紧贴本轮任务），因此也要计入预留预算。
+    reserved = len(fixed) + len(trailer) + len(tool_text) + 2
     history = [m for m in messages if m.role != "system"]
 
     # 从最新一条往前累加，直到预算用尽。
@@ -230,6 +390,24 @@ def build_prompt(
             truncated = True
 
     included = len(rendered)
+    if truncated:
+        # 省略说明放在历史**之前**，紧跟在播种头部后面。
+        rendered.insert(0, _OMISSION_NOTE)
+    # 工具说明的位置（chatgpt-bridge T1.1 实测结论）：**紧贴本轮任务之前**，而不是
+    # 整段历史之前，也不是整段 prompt 的末尾——隔着上千行历史时模型倾向于直接凭
+    # 知识作答；贴到任务前才有近因效应，同时仍满足「工具说明先于任务」的约定。
+    if tool_text:
+        rendered.insert(max(0, len(rendered) - 1), tool_text)
+    # 死循环防护：同一命令反复发出且每次都是空输出时，直接在末尾点名（近因效应）。
+    empty_call_ids = [
+        m.tool_call_id
+        for m in messages
+        if m.role == "tool" and _is_empty_tool_output(m.content or "")
+    ]
+    if empty_call_ids:
+        repeats = _repeated_empty_calls(messages, empty_call_ids)
+        if repeats:
+            rendered.append(format_repeat_call_hint(repeats))
     body = "\n\n".join(rendered)
     text = "\n\n".join(part for part in (fixed, body, trailer) if part)
     notes: List[str] = []
