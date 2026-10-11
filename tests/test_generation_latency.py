@@ -11,42 +11,21 @@
 from __future__ import annotations
 
 import asyncio
-import types
-from typing import Any, Dict, List
+from typing import Any, Dict
 
 import pytest
 
 from claude_web import config
 from claude_web.browser import selectors
-from claude_web.completion import generator as generator_module
 from claude_web.completion.generator import ReplyGenerator
-from claude_web.errors import ContextLimitError, PromptSubmissionError, ReplyNotFoundError
-from tests.fakes import FakePage
-
-
-class VirtualClock:
-    """记录每次睡眠并驱动 ``time.monotonic`` 的虚拟时钟。"""
-
-    def __init__(self) -> None:
-        self.total = 0.0
-        self.intervals: List[float] = []
-
-    async def sleep(self, seconds: float) -> None:
-        self.total += float(seconds)
-        self.intervals.append(float(seconds))
-
-    def monotonic(self) -> float:
-        return self.total
+from claude_web.errors import PromptSubmissionError, ReplyNotFoundError
+from tests.fakes import FakePage, VirtualClock
 
 
 @pytest.fixture
-def clock(monkeypatch) -> VirtualClock:
-    virtual = VirtualClock()
-    monkeypatch.setattr(generator_module, "asyncio", types.SimpleNamespace(sleep=virtual.sleep))
-    monkeypatch.setattr(
-        generator_module, "time", types.SimpleNamespace(monotonic=virtual.monotonic)
-    )
-    return virtual
+def clock(virtual_time: VirtualClock) -> VirtualClock:
+    """本文件里统一叫 ``clock``（实现见 conftest 的 ``virtual_time``）。"""
+    return virtual_time
 
 
 class CountingPage(FakePage):
@@ -64,26 +43,11 @@ class CountingPage(FakePage):
         return self.evaluate_calls.get(expression, 0)
 
 
-def _defaults(monkeypatch, **overrides) -> None:
-    values = {
-        "POLL_INTERVAL_S": 1.5,
-        "POLL_INTERVAL_ACTIVE_S": 0.4,
-        "SETTLE_S": 2.5,
-        "SETTLE_NO_SIGNAL_S": 6.0,
-        "SUBMIT_LOST_S": 6.0,
-        "STALL_S": 30.0,
-        "RESPONSE_TIMEOUT_S": 300.0,
-        "RESPONSE_TIMEOUT_EXTEND_S": 0.0,
-        "MAX_UPSTREAM_RETRIES": 0,
-    }
-    values.update(overrides)
-    for name, value in values.items():
-        monkeypatch.setattr(config, name, value)
-
-
-def test_streaming_polls_fast_and_settles_after_settle_window(clock, monkeypatch):
+def test_streaming_polls_fast_and_settles_after_settle_window(
+    clock: VirtualClock, monkeypatch, default_timing
+):
     """页面在第 2 轮就落定：剩下的等待只应是 SETTLE_S，而不是固定 6 秒尾部。"""
-    _defaults(monkeypatch)
+    monkeypatch.setattr(config, "MAX_UPSTREAM_RETRIES", 0)
     page = FakePage(
         snapshots=["正在执行。", "做完了：一切正常。"],
         generating_plan=[True, False],
@@ -99,9 +63,11 @@ def test_streaming_polls_fast_and_settles_after_settle_window(clock, monkeypatch
     assert clock.total < 4.0
 
 
-def test_idle_polling_keeps_stall_window_in_wall_clock(clock, monkeypatch):
+def test_idle_polling_keeps_stall_window_in_wall_clock(
+    clock: VirtualClock, monkeypatch, default_timing
+):
     """静止期用基础间隔：停滞窗口仍是 STALL_S 秒，不因轮询变快而缩短。"""
-    _defaults(monkeypatch, STALL_S=30.0)
+    monkeypatch.setattr(config, "MAX_UPSTREAM_RETRIES", 0)
     page = FakePage(snapshots=[], generating_plan=[False])
     with pytest.raises(ReplyNotFoundError):
         asyncio.run(ReplyGenerator().generate(page, "hi"))
@@ -110,42 +76,38 @@ def test_idle_polling_keeps_stall_window_in_wall_clock(clock, monkeypatch):
     assert all(interval == pytest.approx(1.5) for interval in clock.intervals[1:])
 
 
-def test_lost_submission_fails_within_submit_window(clock, monkeypatch):
+def test_lost_submission_fails_within_submit_window(
+    clock: VirtualClock, monkeypatch, default_timing
+):
     """提交没生效：按 SUBMIT_LOST_S 快速失败，而不是等满 30s 停滞窗口。"""
-    _defaults(monkeypatch, SUBMIT_LOST_S=6.0, STALL_S=30.0)
+    monkeypatch.setattr(config, "MAX_UPSTREAM_RETRIES", 0)
     page = FakePage(snapshots=[], generating_plan=[False], submit_lands=False)
     with pytest.raises(PromptSubmissionError):
         asyncio.run(ReplyGenerator().generate(page, "hi"))
     assert clock.total < 8.0
 
 
-def test_context_limit_scan_runs_only_when_page_is_static(clock, monkeypatch):
-    """「到顶」扫描要读整页文本：流式期间一次都不做。"""
-    _defaults(monkeypatch)
+def test_successful_run_does_no_full_page_scan(
+    clock: VirtualClock, monkeypatch, default_timing
+):
+    """「到顶」扫描要读整页可见文本（强制布局）：正常成功的轮次一次都不做。
+
+    （旧实现按固定轮询次数扫整页；那时一次仅几十字符的短回复也会扫一次全页。）
+    """
     page = CountingPage(
         snapshots=["a", "ab", "abc", "abcd"],
         generating_plan=[True, True, True, False],
-        body_text="XX",
-    )
-    asyncio.run(ReplyGenerator().generate(page, "hi"))
-    # 只有页面静止（第 4 轮之后）那一次扫描。
-    assert page.count(selectors.BODY_TEXT_JS) == 1
-
-
-def test_context_limit_still_detected_once_page_is_static(clock, monkeypatch):
-    _defaults(monkeypatch)
-    page = CountingPage(
-        snapshots=["a", "ab"],
-        generating_plan=[True, False],
         body_text="已达长度限制，请开启新对话",
     )
-    with pytest.raises(ContextLimitError):
-        asyncio.run(ReplyGenerator().generate(page, "hi"))
+    result = asyncio.run(ReplyGenerator().generate(page, "hi"))
+    assert result.text == "abcd"
+    assert page.count(selectors.BODY_TEXT_JS) == 0
 
 
-def test_settle_does_not_fire_while_page_still_generating(clock, monkeypatch):
+def test_settle_does_not_fire_while_page_still_generating(
+    clock: VirtualClock, monkeypatch, default_timing
+):
     """页面自述仍在生成时，静默时长累计不上：正文不变也不会提前收尾。"""
-    _defaults(monkeypatch, SETTLE_S=2.5)
     page = FakePage(
         snapshots=["思考中…"],
         generating_plan=[True, True, True, True, False],

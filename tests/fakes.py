@@ -194,6 +194,37 @@ class FakePage:
         return "assistant" in selector or "claude-message" in selector
 
 
+class VirtualClock:
+    """虚拟时间轴：记录每次睡眠并驱动 ``time.monotonic``。
+
+    把 ``asyncio.sleep`` 与 ``time.monotonic`` 同时指向它，就能在毫秒内断言「客户端等了
+    多少秒」与「轮询间隔序列」，而不需要真的睡几秒（阈值的比较仍按真实秒数进行）。
+    """
+
+    def __init__(self) -> None:
+        self.total = 0.0
+        self.intervals: List[float] = []
+
+    async def sleep(self, seconds: float) -> None:
+        self.total += float(seconds)
+        self.intervals.append(float(seconds))
+
+    def monotonic(self) -> float:
+        return self.total
+
+    def install(self, monkeypatch) -> "VirtualClock":
+        """把生成模块里的 ``asyncio.sleep`` / ``time.monotonic`` 换成本虚拟时间轴。"""
+        import types
+
+        from claude_web.completion import generator as generator_module
+
+        monkeypatch.setattr(generator_module, "asyncio", types.SimpleNamespace(sleep=self.sleep))
+        monkeypatch.setattr(
+            generator_module, "time", types.SimpleNamespace(monotonic=self.monotonic)
+        )
+        return self
+
+
 class FakeDriver:
     """与 :class:`~claude_web.driver.ClaudeWebDriver` 接口一致的替身。"""
 
@@ -251,4 +282,12 @@ def make_service(page: FakePage, tmp_path, **overrides):
     return service
 
 
-__all__ = ["FakeElement", "FakeKeyboard", "FakePage", "FakeDriver", "make_service", "config"]
+__all__ = [
+    "FakeElement",
+    "FakeKeyboard",
+    "FakePage",
+    "FakeDriver",
+    "VirtualClock",
+    "make_service",
+    "config",
+]

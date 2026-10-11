@@ -38,3 +38,30 @@ def fast_config(tmp_path, monkeypatch):
 @pytest.fixture
 def state_path(tmp_path):
     return tmp_path / "state.json"
+
+
+@pytest.fixture
+def virtual_time(monkeypatch):
+    """把生成循环换成虚拟时间轴（毫秒级跑完真实秒数的判定）。
+
+    见 :class:`tests.fakes.VirtualClock`：断言的是「客户端等待了多少秒」而不是真实耗时。
+    """
+    from tests.fakes import VirtualClock
+
+    return VirtualClock().install(monkeypatch)
+
+
+@pytest.fixture
+def default_timing(monkeypatch):
+    """把结束 / 停滞 / 轮询参数恢复成**默认值**（不受 fast_config 的毫秒级覆盖影响）。"""
+    for name, value in (
+        ("POLL_INTERVAL_S", 1.5),
+        ("POLL_INTERVAL_ACTIVE_S", 0.4),
+        ("SETTLE_S", 2.5),
+        ("SETTLE_NO_SIGNAL_S", 6.0),
+        ("SUBMIT_LOST_S", 6.0),
+        ("STALL_S", 30.0),
+        ("RESPONSE_TIMEOUT_S", 300.0),
+        ("RESPONSE_TIMEOUT_EXTEND_S", 0.0),
+    ):
+        monkeypatch.setattr(config, name, value)
