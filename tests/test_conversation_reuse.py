@@ -185,7 +185,9 @@ def test_http_client_messages_share_one_web_conversation(tmp_path, monkeypatch):
     assert second.status_code == 200, second.text
     # 关键验收：第二条消息没有新开网页会话，且只把增量发进输入框。
     assert len(opened) == 1
-    assert page.composer.text.strip() == "第二轮任务"
+    assert page.filled_texts[-1].strip() == "第二轮任务"
+    # 提交成功后输入区被站点清空（试身已按真实页面模拟），否则就会被判成「提交没生效」。
+    assert page.composer.text == ""
 
 
 def test_delta_messages_helper():

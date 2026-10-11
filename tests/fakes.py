@@ -16,10 +16,11 @@ from claude_web.page_pool import PagePool
 
 
 class FakeElement:
-    def __init__(self, text: str = "", visible: bool = True) -> None:
+    def __init__(self, text: str = "", visible: bool = True, on_fill: Optional[Callable[[str], None]] = None) -> None:
         self.text = text
         self.visible = visible
         self.clicks = 0
+        self._on_fill = on_fill
 
     async def is_visible(self) -> bool:
         return self.visible
@@ -29,6 +30,8 @@ class FakeElement:
 
     async def fill(self, text: str) -> None:
         self.text = text
+        if self._on_fill is not None:
+            self._on_fill(text)
 
     async def click(self) -> None:
         self.clicks += 1
@@ -39,18 +42,25 @@ class FakeKeyboard:
         self.page = page
 
     async def press(self, key: str) -> None:
-        if key == "Enter":
-            self.page.submitted = True
+        if key != "Enter":
+            return
+        # 真实页面上 Enter 提交成功后输入区会被清空（桥的「提交到底有没有生效」判断
+        # 依赖这一点）；提交没生效时提示词原样留在输入区。
+        self.page.submitted = bool(self.page.submit_lands)
+        if self.page.submit_lands:
+            self.page.composer.text = ""
 
     async def insert_text(self, text: str) -> None:
         self.page.composer.text = text
+        self.page.filled_texts.append(text)
 
 
 class FakePage:
     """可脚本化的假页面。
 
     * ``snapshots``：提交后每轮轮询看到的回复正文（递增）；
-    * ``generating_plan``：每轮 ``is_generating`` 的返回值（最后一项重复）。
+    * ``generating_plan``：每轮 ``generating_state`` 的返回值（最后一项重复）；
+    * ``submit_lands``：提交是否真的生效（``False`` = Enter 被忽略、提示词留在输入区）。
     """
 
     def __init__(
@@ -63,11 +73,15 @@ class FakePage:
         challenge_indicator: bool = False,
         authenticated: bool = True,
         composer_available: bool = True,
+        submit_lands: bool = True,
+        stop_control_plan: Optional[List[bool]] = None,
         url: str = "https://claude.ai/new",
         title_text: str = "Claude",
     ) -> None:
         self.snapshots = snapshots if snapshots is not None else ["Hello from Claude"]
         self.generating_plan = generating_plan if generating_plan is not None else [False]
+        #: 控件级信号（可见的停止按钮 / 全局流式标记）的计划值；缺省全为 False。
+        self.stop_control_plan = stop_control_plan
         #: 页面**自身**的文本（会被挑战文案扫描）。
         self.body_text = body_text
         #: 会话正文 / 输入区文本：探针会把它剔除，不属于「站点在拦你」的证据。
@@ -78,7 +92,11 @@ class FakePage:
         self.composer_available = composer_available
         self.url = url
         self.title_text = title_text
-        self.composer = FakeElement("")
+        #: 每次写入输入区的文本（提交后输入区会被清空，断言「发了什么」看这里）。
+        self.filled_texts: List[str] = []
+        #: 提交是否真的生效（Enter 被忽略时页面不会新增回复）。
+        self.submit_lands = submit_lands
+        self.composer = FakeElement("", on_fill=self.filled_texts.append)
         self.keyboard = FakeKeyboard(self)
         self.submitted = False
         self.poll = 0
@@ -127,10 +145,15 @@ class FakePage:
                 "body_text_len": len(self.body_text),
                 "password": not self.authenticated,
             }
-        if expression == selectors.GENERATING_JS:
+        if expression == selectors.GENERATING_STATE_JS:
             value = self._generating_now()
+            stop_control = self._stop_control_now()
             self.poll += 1
-            return value
+            return {
+                "streaming": value,
+                "streaming_selector": (config.RESPONSE_SELECTORS or [None])[0],
+                "stop_control": stop_control,
+            }
         if expression == selectors.BODY_TEXT_JS:
             return self.body_text
         if expression == selectors.COMPLETE_TEXT_JS:
@@ -144,11 +167,18 @@ class FakePage:
         index = min(self.poll, len(self.snapshots) - 1)
         return [self.snapshots[index]]
 
-    def _generating_now(self) -> bool:
+    def _generating_now(self) -> Optional[bool]:
         if not self.submitted:
             return False
         index = min(self.poll, len(self.generating_plan) - 1)
-        return bool(self.generating_plan[index])
+        value = self.generating_plan[index]
+        return None if value is None else bool(value)
+
+    def _stop_control_now(self) -> bool:
+        if not self.stop_control_plan:
+            return False
+        index = min(self.poll, len(self.stop_control_plan) - 1)
+        return bool(self.stop_control_plan[index])
 
     @staticmethod
     def _is_input(selector: str) -> bool:

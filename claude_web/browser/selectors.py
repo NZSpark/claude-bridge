@@ -40,28 +40,60 @@ COMPLETE_TEXT_JS = """
     }
     """
 
-# 探测页面是否仍在生成：停止按钮 / 流式标记。
-GENERATING_JS = """
-    (selectors) => {
+# 探测页面是否仍在生成：**两个独立信号**（doc/design.md 4.2 要求多信号）。
+#
+# 1. 消息级（``reply``）：最后一条 assistant 回复节点自身的 ``data-is-streaming``。
+#    实测该页面上每条回复节点都带这个属性（``true`` = 这条回复正在流式输出，
+#    ``false`` = 已经写完），是「这条消息写完了吗」最直接的页面自述。
+# 2. 控件级（``control``）：可见的停止按钮 / 全局流式标记 —— 站点改版可能让消息级
+#    属性消失，两者取并集，避免只依赖单一选择器。
+#
+# 只回布尔与选择器名，不回显页面正文。
+GENERATING_STATE_JS = """
+    (opts) => {
+      const replySelectors = (opts && opts.reply) || [];
+      const controlSelectors = (opts && opts.control) || [];
+      let streaming = null;
+      let streamingSelector = null;
+      for (const selector of replySelectors) {
+        let nodes;
+        try { nodes = document.querySelectorAll(selector); } catch (e) { continue; }
+        if (!nodes.length) continue;
+        // 与 Python 侧 read_reply_text 同一口径：只用**首个有命中的**选择器，
+        // 且只看最后一条（嵌套容器会让计数翻倍）。
+        const last = nodes[nodes.length - 1];
+        const attr = last.getAttribute('data-is-streaming');
+        if (attr !== null) {
+          streaming = String(attr).toLowerCase() === 'true';
+          streamingSelector = selector;
+        }
+        break;
+      }
       const words = ['stop', '\\u505c\\u6b62'];
-      for (const selector of selectors) {
+      let stopControl = false;
+      for (const selector of controlSelectors) {
         let nodes;
         try { nodes = document.querySelectorAll(selector); } catch (e) { continue; }
         for (const el of nodes) {
+          if (el.getAttribute('data-is-streaming') === 'true') { stopControl = true; break; }
           const label = [
             el.getAttribute('aria-label') || '',
             el.getAttribute('data-testid') || '',
             el.getAttribute('title') || '',
             (el.textContent || '').slice(0, 40),
           ].join(' ').toLowerCase();
-          if (el.getAttribute('data-is-streaming') === 'true') return true;
           if (words.some((w) => label.includes(w))) {
             const rect = el.getBoundingClientRect();
-            if (rect.width > 0 && rect.height > 0) return true;
+            if (rect.width > 0 && rect.height > 0) { stopControl = true; break; }
           }
         }
+        if (stopControl) break;
       }
-      return false;
+      return {
+        streaming: streaming,
+        streaming_selector: streamingSelector,
+        stop_control: stopControl,
+      };
     }
     """
 
@@ -137,7 +169,7 @@ GENERATING_FALLBACK = 'button[aria-label*="Stop"], [data-is-streaming="true"]'
 __all__ = [
     "SELECTOR_VERSION",
     "COMPLETE_TEXT_JS",
-    "GENERATING_JS",
+    "GENERATING_STATE_JS",
     "PAGE_PROBE_JS",
     "BODY_TEXT_JS",
     "GENERATING_FALLBACK",

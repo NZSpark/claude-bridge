@@ -195,3 +195,14 @@ CLAUDE_E2E=1 .venv/bin/python -m pytest tests/e2e -q   # 真实浏览器 E2E（�
 - 流式是**合成流**（轮询页面回复快照做增量），不是上游 token 级流；若网页在流式中
   重写回复，桥接层无法撤回已发送内容，会停止继续发送而不是重复错误内容。
 - 模型别名只有经真实探测确认映射的才会公开；默认只公布 `claude-web`。
+
+## 故障排查
+
+- **客户端一直等到超时**：先看日志里 `[生成]` 的收尾行（结束原因 + 轮询次数 + 正文
+  字符数）。「提交未生效」会以 `prompt_submission_failed` 快速返回；页面空闲且正文无
+  增长会以 `generation_stalled` 提前结束，都不会再空等到 `generation_timeout`。若仍出现
+  绝对超时，说明页面确实一直报「生成中」（``data-is-streaming=true`` 或可见停止按钮）。
+- **回复被截断 / 结果为空**：用 `GET /diagnostics` 看 `selector_version` 与选择器命中数，
+  多数是站点改版导致回复节点选择器落空。
+- **`challenge_required`**：在普通浏览器里先完成一次人工验证；本项目**不**自动绕过验证。
+  若页面其实可用（能打字），只会记为 `challenge_suspect` 诊断提示，不阻断请求。

@@ -27,6 +27,7 @@ from ..errors import (
     ContextLimitError,
     GenerationStalledError,
     GenerationTimeoutError,
+    PromptSubmissionError,
     ReplyNotFoundError,
 )
 from ..models import ToolCall, ToolSpec
@@ -140,6 +141,19 @@ class ReplyGenerator:
         polls = 0
         rewritten = False
         emitted = ""
+        #: 输入区里是否仍留着本轮提示词（``None`` = 未知）。只有确认「还留着」才能在
+        #: 页面空闲时断定提交没生效，用于快路径报错，避免空等到绝对超时。
+        prompt_in_composer: Optional[bool] = None
+
+        def _log_end(reason: str, *, chars: int = 0) -> None:
+            """记一条不含正文的收尾日志：以后「客户端一直等到超时」能直接从日志看出来。"""
+            logger.info(
+                "[生成] %s：轮询 %s 次，正文 %s 字符，曾经生成中=%s",
+                reason,
+                polls,
+                chars,
+                state.saw_generating,
+            )
 
         while True:
             await asyncio.sleep(self.poll_interval)
@@ -152,7 +166,17 @@ class ReplyGenerator:
                 reply_seen = True
                 normalized = normalize_reply(read.text)
 
-            generating = await self.dom.is_generating(page)
+            probe = await self.dom.generating_state(page)
+            generating = probe.generating
+
+            # 还没有任何新回复时才检查「提交到底有没有生效」：真实页面上提交成功会
+            # 立刻清空输入区，所以「输入区里还留着本轮提示词」就是提交没生效的强证据。
+            # 一旦有新回复（或输入区读不出来）就不再参与判定。
+            if not reply_seen:
+                contains = await self.dom.composer_contains(page, prompt)
+                if contains is not None:
+                    prompt_in_composer = contains
+            submit_landed = None if prompt_in_composer is None else not prompt_in_composer
 
             # 只在正文开始出现后检查「到顶」提示，避免整页扫描开销。
             if reply_seen and polls % 4 == 0 and await self.dom.detect_context_limit(page):
@@ -173,8 +197,19 @@ class ReplyGenerator:
                 past_deadline=past,
                 extend_budget=extend_budget,
                 has_partial_text=bool(normalized),
+                submit_landed=submit_landed,
             )
             state = verdict.state
+            logger.debug(
+                "[生成] 轮询 %s：reply_seen=%s 正文=%s 字符 生成中=%s(%s) 静默=%s 空转=%s",
+                polls,
+                reply_seen,
+                len(normalized),
+                generating,
+                probe.reason,
+                state.quiet_count,
+                state.stalled,
+            )
 
             # 增量：非工具模式实时推送；工具模式缓冲到结束再解析。
             if on_delta is not None and normalized and not buffered:
@@ -194,21 +229,31 @@ class ReplyGenerator:
                 extend_budget = max(0.0, extend_budget - verdict.extend_seconds)
                 continue
             if verdict.action == "fail_stalled":
-                if not reply_seen:
-                    raise ReplyNotFoundError(
-                        "提交后未识别到本轮回复（页面无新增 assistant 节点）",
+                if verdict.submit_lost:
+                    _log_end("失败：提交未生效（提示词仍在输入区）")
+                    raise PromptSubmissionError(
+                        "提示词仍留在网页输入区：这次提交没有生效，页面也没有新增回复",
                         detail={"polls": polls},
                     )
+                if not reply_seen:
+                    _log_end("失败：未识别到本轮回复")
+                    raise ReplyNotFoundError(
+                        "提交后未识别到本轮回复（页面无新增 assistant 节点）",
+                        detail={"polls": polls, "note": verdict.note},
+                    )
+                _log_end("失败：生成停滞", chars=len(normalized))
                 raise GenerationStalledError(
-                    "生成停滞：正文长时间无有效增长", detail={"polls": polls}
+                    "生成停滞：正文长时间无有效增长", detail={"polls": polls, "note": verdict.note}
                 )
             if verdict.action == "fail_timeout":
+                _log_end("失败：等待网页版回复超时", chars=len(normalized))
                 raise GenerationTimeoutError(
                     "等待网页版回复超时", detail={"polls": polls, "reply_seen": reply_seen}
                 )
 
         if not reply_seen:
             raise ReplyNotFoundError("未识别到本轮回复", detail={"polls": polls})
+        _log_end(f"完成（{verdict.note or '正文稳定'}）", chars=len(normalized))
 
         # 最终快照可能比轮询中读到的更完整，这里再读一次。
         final = await self.extractor.read_new(page, baseline)

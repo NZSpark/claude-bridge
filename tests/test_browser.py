@@ -260,3 +260,70 @@ def test_fill_composer_clears_composer_before_keyboard_fallback():
     page.keyboard = _AppendingKeyboard(page)
     asyncio.run(ClaudeDOMAdapter().fill_composer(page, LONG_PROMPT))
     assert page.composer.text == LONG_PROMPT
+
+
+# ---- 生成中探测（多信号）----
+
+
+def _generating(page: FakePage):
+    dom = ClaudeDOMAdapter()
+    return asyncio.run(dom.generating_state(page))
+
+
+def test_generating_reads_reply_streaming_attribute():
+    """消息级信号：最后一条回复节点自己的 ``data-is-streaming``。"""
+    page = FakePage(generating_plan=[True])
+    page.submitted = True
+    state = _generating(page)
+    assert state.generating is True
+    assert state.streaming is True
+    assert state.reason == "reply_attr"
+
+
+def test_generating_is_false_when_reply_finished():
+    page = FakePage(generating_plan=[False])
+    page.submitted = True
+    state = _generating(page)
+    assert state.generating is False
+    assert state.streaming is False
+    assert state.reason == "no_signal"
+
+
+def test_generating_takes_union_of_signals():
+    """两路信号取并集：消息级说写完了、但可见的停止按钮仍在 → 仍按生成中。
+
+    反过来（消息级说正在流、控件探不到）也必须判成生成中，否则站点改版后
+    stop 按钮消失就会把「还在写」误判成「已结束」。
+    """
+    busy_control = FakePage(generating_plan=[False], stop_control_plan=[True])
+    busy_control.submitted = True
+    state = _generating(busy_control)
+    assert state.generating is True
+    assert state.reason == "stop_control"
+
+    busy_reply = FakePage(generating_plan=[True], stop_control_plan=[False])
+    busy_reply.submitted = True
+    assert _generating(busy_reply).generating is True
+
+
+def test_generating_probe_failure_is_unknown():
+    """探测抛异常时只能是 Unknown，不能当成「已结束」。"""
+
+    class _Broken(FakePage):
+        async def evaluate(self, expression: str, arg=None):
+            raise RuntimeError("probe failed")
+
+    state = _generating(_Broken())
+    assert state.generating is None
+    assert state.reason == "unknown"
+
+
+def test_composer_contains_distinguishes_empty_from_unavailable():
+    """``None`` = 读不出来（未知），不能当成「输入区里没这段文本」。"""
+    dom = ClaudeDOMAdapter()
+    page = FakePage()
+    assert asyncio.run(dom.composer_contains(page, LONG_PROMPT)) is False
+    asyncio.run(page.composer.fill(LONG_PROMPT))
+    assert asyncio.run(dom.composer_contains(page, LONG_PROMPT)) is True
+    missing = FakePage(composer_available=False)
+    assert asyncio.run(dom.composer_contains(missing, LONG_PROMPT)) is None

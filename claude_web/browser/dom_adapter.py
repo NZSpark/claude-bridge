@@ -75,6 +75,44 @@ class ReplySnapshot:
     selector: Optional[str] = None
 
 
+@dataclass
+class GeneratingState:
+    """「页面是否仍在生成本轮回复」的多信号判定结果（doc/design.md 4.2、4.4）。
+
+    两个独立信号：
+
+    * ``streaming``：最后一条回复节点自身的 ``data-is-streaming``（页面自述；
+      ``None`` = 该页面上没有这个属性，或还没有任何回复节点）；
+    * ``stop_control``：控件级信号（可见的停止按钮 / 全局流式标记）。
+
+    ``generating`` 是两者取并集的结论；两者都探不到时按「没有生成迹象」处理
+    （与旧行为一致），只有探测本身抛异常才是 ``None``（未知）。
+    """
+
+    generating: Optional[bool] = None
+    streaming: Optional[bool] = None
+    stop_control: bool = False
+    selector: Optional[str] = None
+
+    @property
+    def reason(self) -> str:
+        """判定依据（日志 / 诊断用，不含页面正文）。"""
+        if self.generating is None:
+            return "unknown"
+        if self.generating:
+            return "stop_control" if self.stop_control else "reply_attr"
+        return "no_signal"
+
+    def as_detail(self) -> dict:
+        return {
+            "generating": self.generating,
+            "streaming": self.streaming,
+            "stop_control": self.stop_control,
+            "selector": self.selector,
+            "reason": self.reason,
+        }
+
+
 async def _maybe_await(value: Any) -> Any:
     if inspect.isawaitable(value):
         return await value
@@ -191,15 +229,35 @@ class ClaudeDOMAdapter(DiagnosticsMixin):
             )
         return status
 
+    async def generating_state(self, page: Any) -> GeneratingState:
+        """探测页面是否仍在生成本轮回复（多信号；探测失败返回未知）。"""
+        control = list(config.GENERATING_SELECTORS)
+        if selectors.GENERATING_FALLBACK not in control:
+            control.append(selectors.GENERATING_FALLBACK)
+        try:
+            info = await page.evaluate(
+                selectors.GENERATING_STATE_JS,
+                {"reply": list(config.RESPONSE_SELECTORS), "control": control},
+            )
+        except Exception:  # noqa: BLE001
+            return GeneratingState()
+        if not isinstance(info, dict):
+            return GeneratingState()
+        raw_streaming = info.get("streaming")
+        streaming = raw_streaming if isinstance(raw_streaming, bool) else None
+        stop_control = bool(info.get("stop_control"))
+        selector = str(info.get("streaming_selector") or "") or None
+        generating = bool(stop_control or streaming is True)
+        return GeneratingState(
+            generating=generating,
+            streaming=streaming,
+            stop_control=stop_control,
+            selector=selector,
+        )
+
     async def is_generating(self, page: Any) -> Optional[bool]:
         """页面是否仍在生成；探测失败返回 ``None``（未知）。"""
-        candidates = list(config.GENERATING_SELECTORS)
-        if selectors.GENERATING_FALLBACK not in candidates:
-            candidates.append(selectors.GENERATING_FALLBACK)
-        try:
-            return bool(await page.evaluate(selectors.GENERATING_JS, candidates))
-        except Exception:  # noqa: BLE001
-            return None
+        return (await self.generating_state(page)).generating
 
     async def detect_context_limit(self, page: Any) -> bool:
         """页面是否出现可识别的「会话到顶」提示（排除回复正文的影响）。"""
@@ -310,20 +368,35 @@ class ClaudeDOMAdapter(DiagnosticsMixin):
 
     async def _read_back(self, page: Any, expected: str) -> bool:
         """读回输入区内容，判断是否与期望一致（空内容视为失败）。"""
+        if not self._normalize_text(expected):
+            # 空提示词没有可校验内容（只用于清空场景）。
+            return True
+        return bool(await self.composer_contains(page, expected))
+
+    async def composer_contains(self, page: Any, expected: str) -> Optional[bool]:
+        """输入区里现在是否仍含有 ``expected`` 这段文本。
+
+        与 :meth:`_read_back` 同一套比较口径，但**区分「输入区是空的」与「输入区不可用」**：
+
+        * ``True``：输入区里就是这段文本（提交没生效的强证据）；
+        * ``False``：输入区里没有这段文本（已被站点清空，或读回内容对不上）；
+        * ``None``：输入区找不到 / 读不出内容（未知，不能作为下结论的依据）。
+        """
+        wanted = self._normalize_text(expected)
+        if not wanted:
+            return False
         element = await self.find_composer(page)
         if element is None:
-            return False
+            return None
         try:
             value = await _maybe_await(element.inner_text())
         except Exception:  # noqa: BLE001
-            return False
-        if not isinstance(value, str) or not value.strip():
-            return False
+            return None
+        if not isinstance(value, str):
+            return None
         actual = self._normalize_text(value)
-        wanted = self._normalize_text(expected)
-        if not wanted:
-            # 空提示词没有可校验内容（只用于清空场景）。
-            return True
+        if not actual:
+            return False
         if actual.startswith(wanted):
             return True
         probes = self._read_back_probes(wanted)
@@ -415,4 +488,4 @@ class ClaudeDOMAdapter(DiagnosticsMixin):
         return ReplySnapshot(text=text, count=len(nodes), selector=selector)
 
 
-__all__ = ["ClaudeDOMAdapter", "PageStatus", "ReplySnapshot"]
+__all__ = ["ClaudeDOMAdapter", "GeneratingState", "PageStatus", "ReplySnapshot"]
