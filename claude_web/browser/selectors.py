@@ -177,29 +177,37 @@ PAGE_PROBE_JS = """
     }
     """
 
-# 读取页面可见文本（用于上下文到顶的扫描；正文匹配在 Python 侧做）。
+# 读取页面自身文本（用于上下文到顶的扫描；正文匹配在 Python 侧做）。
 #
-# 会话正文（助手 / 用户消息）必须剔除：用户的提问里完全可能出现「已达长度限制」这类
-# 字样，不剔除就会误报「会话到顶」。但逐节点做整串 replace 是 O(页面文本 × 节点数)，
-# 而绝大多数轮次里页面上根本没有这类提示——因此先做一次廉价的 includes 预判：
-# 没命中就直接返回空串（Python 侧据此判定为否），命中才做剔除。
+# 会话正文（助手 / 用户消息）、输入区与会话列表必须剔除：用户的提问里完全可能出现
+# 「已达长度限制」这类字样，不剔除就会误报「会话到顶」。剔除清单由调用方（
+# ``config.conversation_exclude_selectors()``）传入；script/style 与输入区是本函数自己
+# 恒定的底子。
+#
+# 剔除用**克隆剪枝**（与 PAGE_PROBE_JS 同一手法），而不是「整页文本减子树 innerText」：
+# body 的 innerText 会跨元素重新规范化空白，子树自己的 innerText 往往不是它的子串，
+# 字符串替换会静默失败——实测一个引用了本仓库 .env.example 的会话里，那段文本出现两次
+# （用户消息 + 助手回复），旧做法只剔掉一处，另一处继续让扫描命中，于是每个请求都被误报
+# 成 context_limit_reached。
+#
+# 剪枝要做克隆，成本不低，而绝大多数轮次页面上根本没有这类提示：先做一次廉价的
+# includes 预判，没命中直接返回空串（Python 侧据此判定为否）。
 BODY_TEXT_JS = """
     (opts) => {
       const selectors = (opts && opts.selectors) || [];
       const patterns = (opts && opts.patterns) || [];
-      let text = document.body ? (document.body.innerText || '') : '';
-      if (!text) return '';
-      const lowered = text.toLowerCase();
+      const raw = document.body ? (document.body.innerText || '') : '';
+      if (!raw) return '';
+      const lowered = raw.toLowerCase();
       if (!patterns.some((p) => lowered.includes(p))) return '';
-      for (const s of selectors) {
-        try {
-          for (const n of document.querySelectorAll(s)) {
-            const t = n.innerText || '';
-            if (t) text = text.replace(t, ' ');
-          }
-        } catch (e) {}
+      const clone = document.body.cloneNode(true);
+      const drop = ['script', 'style', 'noscript', 'template',
+                    '[contenteditable="true"]', 'textarea'].concat(selectors);
+      for (const s of drop) {
+        try { for (const n of clone.querySelectorAll(s)) n.remove(); } catch (e) {}
       }
-      return text;
+      // 克隆节点不在渲染树里，innerText 退化为 textContent；上面的非正文子树已移除。
+      return String(clone.innerText || clone.textContent || '');
     }
     """
 

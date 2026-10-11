@@ -265,11 +265,14 @@ class ClaudeDOMAdapter(DiagnosticsMixin):
         if not patterns:
             return False
         try:
-            # JS 侧先做一次廉价的文案预判（没命中直接返回空串），命中才剔除会话正文。
+            # JS 侧先做一次廉价的文案预判（没命中直接返回空串），命中才剔除会话子树。
+            # 剔除清单必须包含**用户消息**：实测一个引用了本仓库 .env.example 里
+            # ``CONTEXT_LIMIT_PATTERNS=context limit||...`` 的会话，只剔除助手回复时
+            # 会让扫描每轮命中，把正常会话误报成 context_limit_reached。
             text = await page.evaluate(
                 selectors.BODY_TEXT_JS,
                 {
-                    "selectors": list(config.RESPONSE_SELECTORS),
+                    "selectors": config.conversation_exclude_selectors(),
                     "patterns": patterns,
                 },
             )

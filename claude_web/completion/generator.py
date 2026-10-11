@@ -11,8 +11,8 @@
 时延与轮询策略（doc/design.md 4.4）：结束 / 停滞阈值全部是**时长**，由
 :class:`~claude_web.end_detection.IdleClock` 累加的「页面静止时长」驱动；轮询间隔
 只影响「多快看到变化」：页面活跃时用 ``POLL_INTERVAL_ACTIVE_S``，页面静止后回到
-``POLL_INTERVAL_S``，并且只剩收尾等待时只睡到静默阈值那一刻。「会话到顶」的整页
-扫描只在页面已经静止时做，最多每 5s 一次（流式期间完全不扫）。
+``POLL_INTERVAL_S``，并且只剩收尾等待时只睡到静默阈值那一刻。「会话到顶」的整页扫描
+只在**即将判定失败**时做一次（命中就用 ``context_limit_reached`` 代替泛化的失败）。
 
 重要：提交一旦**可能成功**，就不再无条件重发（doc/design.md 9.3）——因此本模块
 只在提交前重试，提交后只做「读页面现有回复」式的恢复。
@@ -47,9 +47,6 @@ DeltaCallback = Callable[[str], Awaitable[None]]
 #: 取消探测：返回 True 表示调用方要求中止本轮。
 CancelCheck = Callable[[], bool]
 
-#: 「会话到顶」扫描的最小间隔（秒）。该扫描要读整页可见文本（强制布局），只在页面
-#: 已经静止时才做：正常流式期间完全不扫，静止时也最多每 5s 一次。
-_CONTEXT_SCAN_MIN_INTERVAL_S = 5.0
 #: 单次睡眠的下限（秒），避免退化成忙轮询。
 _MIN_SLEEP_S = 0.05
 
@@ -189,8 +186,8 @@ class ReplyGenerator:
         emitted = ""
         #: 下一轮轮询间隔：活跃期用短间隔，静止期用基础间隔（见 _next_interval）。
         interval = self.active_poll_interval
-        #: 上一次「会话到顶」整页扫描的时刻（仅在页面静止时才扫）。
-        last_context_scan = float("-inf")
+        #: 「会话到顶」扫描是否已做过（每轮任务最多一次，且在失败判定点才做）。
+        context_checked = False
         #: 输入区里是否仍留着本轮提示词（``None`` = 未知）。只有确认「还留着」才能在
         #: 页面静止时断定提交没生效，用于快路径报错，避免空等到绝对超时。
         prompt_in_composer: Optional[bool] = None
@@ -234,21 +231,6 @@ class ReplyGenerator:
                 if contains is not None:
                     prompt_in_composer = contains
             submit_landed = None if prompt_in_composer is None else not prompt_in_composer
-
-            # 「会话到顶」只在页面**已经静止**（正文不再增长）时才可能成立，而且该扫描要读
-            # 整页可见文本（强制布局）：因此流式期间完全不扫，静止时也最多每 5s 一次。
-            # 旧实现按固定轮询次数扫（每 4 轮一次），长回复在流式期间会被反复全页扫描。
-            if (
-                reply_seen
-                and content_changed is False
-                and now - last_context_scan >= _CONTEXT_SCAN_MIN_INTERVAL_S
-            ):
-                last_context_scan = now
-                if await self.dom.detect_context_limit(page):
-                    raise ContextLimitError(
-                        "网页会话已达上下文长度上限，请重置该会话桶",
-                        detail={"polls": polls},
-                    )
 
             past = time.monotonic() > deadline
             verdict = evaluate_poll(
@@ -300,6 +282,21 @@ class ReplyGenerator:
                 idle_seconds=idle_seconds,
                 limits=limits,
             )
+
+            if verdict.action in ("fail_stalled", "fail_timeout") and not context_checked:
+                # 「会话到顶」的整页扫描只在**即将判定失败**时做一次（doc/design.md 4.4）：
+                # 该扫描要读整页可见文本（强制布局），正常轮次一次都不扫；更关键的是，
+                # 把它吊在「每次请求都会命中一次」的位置上会带来假阳性——页面别处（会话
+                # 正文 / 输入区）出现一句特征文案就能把一次**成功的**请求变成错误，并把桶
+                # 标成到顶（下一轮重新播种）。真正到顶时页面不会给出「已落定 + 正文完整」
+                # 的信号，而是不再产生新回复，因此一定会在失败判定点被拦到。
+                context_checked = True
+                if await self.dom.detect_context_limit(page):
+                    _log_end("失败：网页会话已达上下文长度上限", chars=len(normalized))
+                    raise ContextLimitError(
+                        "网页会话已达上下文长度上限，请重置该会话桶",
+                        detail={"polls": polls},
+                    )
 
             if verdict.action == "fail_stalled":
                 if verdict.submit_lost:

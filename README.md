@@ -222,5 +222,11 @@ CLAUDE_E2E=1 .venv/bin/python -m pytest tests/e2e -q   # 真实浏览器 E2E（�
   或 `Claude responded:` / `Claude works directly with your codebase`）：回复节点里除了模型
   正文还有无障碍标题、动作栏、时间戳与推广行，默认由 `REPLY_CHROME_SELECTORS` 剔除；
   站点改版把新的外壳混进来时，把对应选择器加进这项配置即可（无需改代码）。
+- **误报 `context_limit_reached`（「会话已达上下文长度上限」）而会话明明还能用**：判定
+  是在整页文本里找 `CONTEXT_LIMIT_PATTERNS` 的特征文案，因此两件事必须同时成立才不会误报：
+  扫描只在**即将判定失败**时做一次（不采用「每次请求扫一次」），且扫描前剔除会话正文
+  （**包括用户消息**）与输入区。若你确实把这类文字（例如本仓库 `.env.example` 的那一行）
+  发进了会话，旧版本会对每个请求误报——升级后正常；如果你想更严，把
+  `CONTEXT_LIMIT_PATTERNS` 收窄成只属于站点提示的句子。
 - **`challenge_required`**：在普通浏览器里先完成一次人工验证；本项目**不**自动绕过验证。
   若页面其实可用（能打字），只会记为 `challenge_suspect` 诊断提示，不阻断请求。

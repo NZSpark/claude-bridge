@@ -332,11 +332,18 @@ REPLY_CHROME_SELECTORS = env_list(
 )
 
 
-def challenge_exclude_selectors() -> list:
-    """挑战文案扫描要剔除的子树（去重、保序）。
+def conversation_exclude_selectors() -> list:
+    """**会话内容**子树（助手回复、用户消息、会话列表等）——不是页面自身文案的证据。
 
     两套配置都尊重：``CHALLENGE_EXCLUDE_SELECTORS`` 覆盖用户消息 / 会话列表，
     ``RESPONSE_SELECTORS`` 可能被部署方改过，因此取并集而不是二选一。
+
+    两个「在整页文本里找一句特征文案」的扫描共用这一份清单：挑战页扫描与「会话到顶」
+    扫描。用户完全可能在会话里引用同样的字样——实测（2026-10-12，CDP 逐节点核对）：
+    一个把本仓库 ``.env.example`` 里的
+    ``CONTEXT_LIMIT_PATTERNS=context limit||conversation is too long||...``
+    读进会话的任务，会让「会话到顶」扫描**每轮**都命中，把一个完全正常的会话误报成
+    ``context_limit_reached``（同一类事故见 doc/cloudfare.md 3.4）。
     """
     merged: list = []
     for selector in [*CHALLENGE_EXCLUDE_SELECTORS, *RESPONSE_SELECTORS]:
@@ -344,6 +351,11 @@ def challenge_exclude_selectors() -> list:
         if text and text not in merged:
             merged.append(text)
     return merged
+
+
+def challenge_exclude_selectors() -> list:
+    """兼容别名：挑战页扫描与「会话到顶」扫描用同一份会话剔除清单。"""
+    return conversation_exclude_selectors()
 
 
 # ==================== 13. 日志 ====================
