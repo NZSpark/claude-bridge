@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from dataclasses import dataclass, field
@@ -40,6 +41,11 @@ class PagePool:
         self._max_pages = max_pages
         self._idle_ttl_s = idle_ttl_s
         self._closer = closer
+        #: 保护「容量检查 + 驱逐 + 建页」这段临界区：否则两个协程可能为同一桶各建
+        #: 一个页面（先建的被覆盖并泄漏），或并发驱逐把页面数顶破 ``MAX_PAGE_POOL``。
+        self._lock = asyncio.Lock()
+        #: bucket -> 正在创建中的页面任务：同一桶的并发 acquire 合并到同一次创建。
+        self._creating: Dict[str, "asyncio.Future"] = {}
 
     @property
     def max_pages(self) -> int:
@@ -97,14 +103,34 @@ class PagePool:
             await self._close_entry(key, entry)
 
     async def acquire(self, bucket: str, factory: Callable[[], Awaitable[Any]]) -> Any:
-        """取页面；不存在时用 ``factory`` 创建（必要时先回收最久未用的页面）。"""
-        existing = self.get(bucket)
-        if existing is not None:
-            return existing
-        await self.evict_if_needed(exclude=bucket)
-        page = await factory()
-        self.put(bucket, page)
-        return page
+        """取页面；不存在时用 ``factory`` 创建（必要时先回收最久未用的页面）。
+
+        并发保护（T2.2）：
+
+        * 同一桶的并发 acquire 合并成**一次**创建（先到者建、后到者等同一个 future）；
+        * 「容量检查 + 驱逐 + 写入」在池级锁内完成，不会因并发建页顶破 ``MAX_PAGE_POOL``。
+        """
+        async with self._lock:
+            existing = self.get(bucket)
+            if existing is not None:
+                return existing
+            pending = self._creating.get(bucket)
+            if pending is None:
+                pending = asyncio.ensure_future(self._create(bucket, factory))
+                self._creating[bucket] = pending
+                pending.add_done_callback(lambda _f, b=bucket: self._creating.pop(b, None))
+        return await pending
+
+    async def _create(self, bucket: str, factory: Callable[[], Awaitable[Any]]) -> Any:
+        async with self._lock:
+            # 可能在等锁期间已被别的协程建好。
+            existing = self.get(bucket)
+            if existing is not None:
+                return existing
+            await self.evict_if_needed(exclude=bucket)
+            page = await factory()
+            self.put(bucket, page)
+            return page
 
     async def reap_idle(self, now: Optional[float] = None) -> List[str]:
         """关闭空闲超时的页面，返回被回收的桶名。"""

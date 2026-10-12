@@ -165,6 +165,8 @@ class ClaudeWebDriver:
         self._owns_context = True
         self._started = False
         self._start_error: Optional[str] = None
+        #: 保护浏览器初始化：两个桶首次并发请求时，幂等检查本身挡不住重复启动。
+        self._start_lock = asyncio.Lock()
 
     # ---- 生命周期 ----
     @property
@@ -180,10 +182,17 @@ class ClaudeWebDriver:
         return self._start_error
 
     async def start(self) -> None:
-        """启动浏览器，或通过本机 CDP 端口连接到用户启动的 Chrome（幂等）。"""
-        global async_playwright
+        """启动浏览器（幂等且并发安全）：同一进程内只初始化一次（T2.1）。"""
         if self.started:
             return
+        async with self._start_lock:
+            if self.started:
+                return
+            await self._start_unlocked()
+
+    async def _start_unlocked(self) -> None:
+        """实际的启动逻辑；调用方必须已持有 ``_start_lock``。"""
+        global async_playwright
         try:
             if async_playwright is None:  # pragma: no cover - 真实依赖
                 from playwright.async_api import async_playwright as _ap
