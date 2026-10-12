@@ -370,6 +370,39 @@ def delta_messages(messages: Sequence[NormalizedMessage]) -> List[NormalizedMess
     return list(delta)
 
 
+def tool_choice_effect(
+    tool_choice: Any, tools: Optional[Sequence[ToolSpec]] = None
+) -> "tuple[bool, str]":
+    """把 OpenAI 的 ``tool_choice`` 解析成 ``(是否注入工具说明, 附加指令)``。
+
+    此前 ``tool_choice`` 只是被透传、从未被消费（doc/updates_deepseek.md §4 的死键）。
+    这里给出可观测的语义：
+
+    * ``"none"`` -> 不注入工具说明（本轮不该调工具）；
+    * ``"required"`` -> 注入并点名「本轮必须发起一次工具调用」；
+    * ``{"type":"function","function":{"name":"X"}}`` -> 注入并点名只能调 ``X``；
+    * ``"auto"`` / ``None`` / 其它 -> 维持现状（注入，不加指令）。
+    """
+    if not tools:
+        return False, ""
+    if isinstance(tool_choice, str):
+        if tool_choice == "none":
+            return False, ""
+        if tool_choice == "required":
+            return True, "[本轮要求] 你必须发起一次工具调用，不要只用文字作答。"
+        return True, ""
+    if isinstance(tool_choice, dict):
+        fn = tool_choice.get("function")
+        name = fn.get("name") if isinstance(fn, dict) else None
+        if name:
+            allowed = {spec.name for spec in tools}
+            if name in allowed:
+                return True, f"[本轮要求] 你只能调用工具 `{name}`，不要调用其它工具。"
+            # 点名了未声明的工具：仍注入说明（不静默丢弃），但不给误导性指令。
+            return True, ""
+    return True, ""
+
+
 def build_prompt(
     messages: Sequence[NormalizedMessage],
     *,
@@ -378,6 +411,7 @@ def build_prompt(
     include_preamble: Optional[bool] = None,
     include_system: Optional[bool] = None,
     extra_sections: Optional[Sequence[str]] = None,
+    tool_choice: Any = None,
 ) -> PromptBuild:
     """把归一化消息构建为网页输入框文本。
 
@@ -410,8 +444,12 @@ def build_prompt(
     #
     # 这里直接扫原始正文，**不再先把整段历史渲染一遍**：旧写法为了做一次子串判定
     # 就渲染 + 拼接全部历史（含每条 20k 字符的工具结果），每轮请求都要重做一次。
-    if tools and not _mentions_tool_instructions(messages, system_text, TOOLCALL_HEADER):
+    inject_tools, choice_directive = tool_choice_effect(tool_choice, tools)
+    if inject_tools and not _mentions_tool_instructions(messages, system_text, TOOLCALL_HEADER):
         tool_text = format_tools_instruction(tools)
+    if choice_directive:
+        # 指令紧跟工具说明，避免被长正文稀释（tool_choice 生效点，T4.6 / D4.6）。
+        tool_text = f"{tool_text}\n\n{choice_directive}" if tool_text else choice_directive
     # 新会话 / 重置后的第一轮：把格式强调再放一次（模型最容易在这时候无视工具）。
     emphasis = format_tool_call_emphasis(tools) if (tool_text and include_preamble) else ""
 

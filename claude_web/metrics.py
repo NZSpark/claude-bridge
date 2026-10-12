@@ -32,6 +32,9 @@ COUNTERS = (
     "prompt_submission_failed_total",
     "reply_not_found_total",
     "context_limit_reached_total",
+    # 网页重写已流出的回复（T4.4 / D4.4）：此时无法撤回已发送内容，只能停止续发，
+    # 最终文本以收尾块为准。计数它便于在 /metrics 上观察重写频率。
+    "stream_rewritten_total",
 )
 
 LATENCIES = (

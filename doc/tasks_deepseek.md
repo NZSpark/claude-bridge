@@ -108,19 +108,24 @@
   - **关键坑**：存储必须用 `ToolCall` 的**嵌套**形态（`{id,type,function:{name,arguments}}`），因为回灌走 `ChatMessage(**item)`，其 `tool_calls` 类型是 `List[ToolCall]`；若存内部扁平形态（`{id,name,arguments}`）会在 pydantic 校验处直接 `ValidationError: tool_calls.0.function Field required`。之后 `normalize_messages` → `_tool_calls_to_payload` 会把它转回内部扁平表示。
   - 回归 `tests/test_responses.py` 新增两条：工具循环续接（两条 assistant 调用 + tool 结果归属都在、名字/参数完整）、无工具调用时仍存纯文本。
 - [ ] **D4.3** 补齐 Responses 事件集并做真实客户端探测（来源 4.4）：补 `output_item.added|done`、`output_text.done` 等；用 Codex CLI 之类真实客户端验证，结果记入 `doc/tasks.md`。
-- [ ] **D4.4** 流式细节（来源 4.10）
+- [x] **D4.4** 流式细节（来源 4.10）
   - 网页重写回复时增加 `stream_rewritten_total` 指标，并在最终块或 `bridge_notes` 说明「已截断」。
   - `on_delta` 只在内容变化时回调（现在每轮都回调，队列堆重复项）。
   - 支持 `stream_options.include_usage`。
   - 已见回复后读取节点短暂失败时，保留上一次文本继续判定。
   - 文件：`server.py`、`generator.py`、`chat_adapter.py`、`metrics.py`。
+  - **落地（三项）**：① `generator` 的 `on_delta` 加 `normalized != emitted` 判定，只在内容变化时回调（此前每轮轮询都回调，队列堆重复项）；② `metrics.COUNTERS` 新增 `stream_rewritten_total`，chat 与 Responses 两条路径在首次检测到重写时 `inc`（用 `if not rewritten` 防重复计数）；③ `StreamEncoder.usage()` 发 choices 为空、usage 非空的收尾块，`server._include_usage` 读 `task.stream_options.include_usage`，`chat_adapter.to_task` 透传 `stream_options`，`ChatTask` 新增该字段。
+  - 回归 `tests/test_stream_details.py` 三条：usage 块结构、`_include_usage` 判定、指标名已注册。
 - [ ] **D4.5** 提示词体量（来源 4.5）
   - 增量模式只在重播种、工具清单变化或每 N 轮重发工具说明（与 D1.1 的状态方案同一处）。
   - 调大 `SYSTEM_MAX_CHARS` 默认值，截断时写进 notes。
   - `SEED_ENV_NOTE` 默认留空，由部署方配置。
   - 文件：`prompting.py`、`config.py`、`.env.example`。
   - 依赖：D1.1。
-- [ ] **D4.6** `tool_choice` 生效（来源 4.5，**grep 确认当前无消费点**）：至少 `none` 时不注入工具说明；`required` 与指定函数在提示里点名。文件：`prompting.py`、`api/chat_adapter.py`、`models.py`、`tests/test_prompting.py`。
+- [x] **D4.6** `tool_choice` 生效（来源 4.5，**grep 确认当前无消费点**）：至少 `none` 时不注入工具说明；`required` 与指定函数在提示里点名。文件：`prompting.py`、`api/chat_adapter.py`、`models.py`、`tests/test_prompting.py`。
+  - **落地**：新增纯函数 `prompting.tool_choice_effect(tool_choice, tools) -> (是否注入, 附加指令)`；`build_prompt` 增加 `tool_choice` 参数，`none` 时不注入工具说明，`required` / 指定函数在工具说明后追加点名指令；`SessionLifecycle.prepare` 与 `service.run` 透传 `task.tool_choice`。点名未声明的工具时仍注入说明（不静默丢弃）但不给误导指令。
+  - 回归 `tests/test_tool_choice.py` 六条：none 抑制、auto/None 维持、required 点名、指定函数点名、未声明函数不误导、无工具时不注入。
+  - 关闭 `doc/updates_deepseek.md` §4 死键表里的 `tool_choice` 未接线项。
 
 ## 阶段 5：日志、解析与落盘
 

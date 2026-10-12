@@ -44,6 +44,7 @@ def to_task(request: ChatCompletionRequest, bucket: str) -> ChatTask:
         stream=bool(request.stream),
         tools=tools,
         tool_choice=request.tool_choice,
+        stream_options=request.stream_options,
     )
 
 
@@ -152,6 +153,22 @@ class StreamEncoder:
 
     def final(self, finish_reason: str) -> str:
         return sse_data(self._payload({}, finish_reason))
+
+    def usage(self, usage: Usage) -> str:
+        """usage 收尾块（``stream_options.include_usage``）。
+
+        OpenAI 约定：开启后，在 ``finish_reason`` 之后额外发一个 ``choices`` 为空、
+        ``usage`` 非空的 chunk。这里照此实现（T4.4 / D4.4）。
+        """
+        payload = {
+            "id": self.id,
+            "object": "chat.completion.chunk",
+            "created": self.created,
+            "model": self.model,
+            "choices": [],
+            "usage": usage.model_dump(),
+        }
+        return sse_data(payload)
 
     @staticmethod
     def done() -> str:

@@ -21,6 +21,7 @@ from .api.chat_adapter import (
     StreamEncoder,
     build_completion_response,
     build_sse_headers,
+    estimate_usage,
     to_task,
 )
 from .api.responses_adapter import (
@@ -464,6 +465,17 @@ def _keepalive_s() -> float:
     return max(0.1, float(config.STREAM_KEEPALIVE_S))
 
 
+def _include_usage(task: ChatTask) -> bool:
+    """客户端是否要求流式附带 usage（``stream_options.include_usage``）。
+
+    此前该字段声明了却从未被消费（T4.4 / D4.4）。
+    """
+    opts = task.stream_options
+    if not isinstance(opts, dict):
+        return False
+    return bool(opts.get("include_usage"))
+
+
 async def _stream_bridge_reply(task: ChatTask, reply: str) -> AsyncIterator[str]:
     """桥内命令的本地 SSE：没有上游生成，直接一次性吐出应答。"""
     encoder = StreamEncoder(task.model)
@@ -518,6 +530,8 @@ async def _stream_chat_completion(
                 piece, reset = delta_piece(sent, payload)
                 if reset is not None:
                     # 网页重写了回复：无法撤回已发送内容，停止继续发送，避免重复错误内容。
+                    if not rewritten:
+                        metrics.inc("stream_rewritten_total")
                     rewritten = True
                 elif piece:
                     sent = payload
@@ -535,6 +549,12 @@ async def _stream_chat_completion(
                         for chunk in encoder.content(final[len(sent):] if final.startswith(sent) else final):
                             yield chunk
                     yield encoder.final(outcome.result.finish_reason)
+                if _include_usage(task):
+                    # OpenAI 约定：usage chunk 在 finish_reason 之后、[DONE] 之前
+                    # （T4.4 / D4.4）。
+                    yield encoder.usage(
+                        estimate_usage(outcome.conversation.prompt, outcome.result.text)
+                    )
                 yield encoder.done()
                 return
             elif kind == "error":
@@ -615,6 +635,8 @@ async def _stream_responses(
                 if reset is not None:
                     # 网页重写了回复：无法撤回已发出的增量，停止再发，避免重复错误内容。
                     # 与 chat 路径同一语义；最终文本在 ``response.completed`` 里如实给出。
+                    if not rewritten:
+                        metrics.inc("stream_rewritten_total")
                     rewritten = True
                 elif piece:
                     sent = payload

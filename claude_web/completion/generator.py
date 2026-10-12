@@ -342,11 +342,19 @@ class ReplyGenerator:
             )
 
             # 增量：非工具模式实时推送；工具模式缓冲到结束再解析。
-            if on_delta is not None and normalized and not buffered:
+            # 只在**内容变化**时回调（T4.4 / D4.4）：此前每轮轮询都回调一次，
+            # 即使正文一字未动，调用方队列里会堆满重复项、下游白做一遍编码。
+            if (
+                on_delta is not None
+                and normalized
+                and not buffered
+                and normalized != emitted
+            ):
                 if normalized.startswith(emitted):
                     emitted = normalized
-                elif normalized != emitted:
+                else:
                     rewritten = True
+                    emitted = normalized
                 await on_delta(normalized)
 
             last_normalized = normalized

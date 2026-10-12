@@ -168,6 +168,7 @@ class SessionLifecycle:
         tools: Optional[Sequence[ToolSpec]] = None,
         *,
         link_url: Optional[str] = None,
+        tool_choice: Any = None,
     ) -> Conversation:
         """为新任务准备页面与提示词。
 
@@ -200,7 +201,11 @@ class SessionLifecycle:
         system_digest = _digest(extract_system_text(messages))
         include_system = need_seed or self._seeded_system.get(bucket) != system_digest
         prompt_build = build_prompt(
-            messages, tools=tools, seed=need_seed, include_system=include_system
+            messages,
+            tools=tools,
+            seed=need_seed,
+            include_system=include_system,
+            tool_choice=tool_choice,
         )
         notes = list(prompt_build.notes)
         if not need_seed and include_system:

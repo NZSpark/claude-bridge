@@ -170,6 +170,8 @@ class ChatTask:
     stream: bool = False
     tools: List[ToolSpec] = field(default_factory=list)
     tool_choice: Optional[Any] = None
+    #: 客户端流式选项（``stream_options``）；目前只用 ``include_usage``（T4.4 / D4.4）。
+    stream_options: Optional[Dict[str, Any]] = None
 
 
 # ==================== 3. 任务快照（doc/design.md 9.3）====================

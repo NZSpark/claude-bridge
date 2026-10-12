@@ -143,7 +143,7 @@ class ChatService:
 
         # 准备阶段失败（未登录 / 页面不可用）尚未提交，可安全报告为未就绪。
         conversation = await self.lifecycle.prepare(
-            task.bucket, task.messages, task.tools
+            task.bucket, task.messages, task.tools, tool_choice=task.tool_choice
         )
         snapshot.state = "submitted"
         snapshot.submitted = True
