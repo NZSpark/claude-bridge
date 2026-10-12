@@ -30,6 +30,9 @@ from .. import config
 from ..browser.dom_adapter import ClaudeDOMAdapter
 from ..end_detection import EndLimits, EndState, IdleClock, evaluate_poll
 from ..errors import (
+    AuthenticationRequiredError,
+    ChallengeRequiredError,
+    ComposerNotFoundError,
     ContextLimitError,
     GenerationCancelledError,
     GenerationStalledError,
@@ -138,14 +141,38 @@ class ReplyGenerator:
                 return min(base, max(_MIN_SLEEP_S, remaining + _MIN_SLEEP_S))
         return base
 
+    #: 不可重试的写入失败：重试要么必然再次失败，要么会掩盖真实原因（T3.2）。
+    #:
+    #: * ``ComposerNotFoundError``：输入区**根本不存在**（未登录 / 页面结构变了 /
+    #:   正被其它弹层盖住）——再点几次也不会出现，快速失败并把原因如实上报；
+    #: * ``AuthenticationRequiredError`` / ``ChallengeRequiredError``：登录态失效或
+    #:   人机挑战，重试无效；
+    #: * ``PromptSubmissionError``：``fill_composer`` 内部已经跑满 ``FILL_RETRIES``
+    #:   并退化过键盘路径，外层再套一层只会把「失败一次」放大成 N 次无意义写入。
+    _UNRECOVERABLE_FILL_ERRORS = (
+        ComposerNotFoundError,
+        AuthenticationRequiredError,
+        ChallengeRequiredError,
+        PromptSubmissionError,
+    )
+
     async def _fill(self, page, prompt: str) -> None:
-        """填充输入框；仅在此阶段允许重试（无副作用）。"""
+        """填充输入框；仅在此阶段允许重试（无副作用）。
+
+        重试边界（T3.2）：``fill_composer`` 自己已经带 ``FILL_RETRIES`` 次重试 +
+        键盘退化兜底，因此这里**只**对「瞬时、可恢复」的写入失败再补一层外层重试
+        （例如页面正在重排导致的一次性 DOM 抖动）；命中 :attr:`_UNRECOVERABLE_FILL_ERRORS`
+        则立即冒泡，不做叠加重试，也不吞掉 ``CancelledError``（T2.5）。
+        """
         attempts = max(1, config.MAX_UPSTREAM_RETRIES + 1)
         last: Optional[BaseException] = None
         for attempt in range(attempts):
             try:
                 await self.dom.fill_composer(page, prompt)
                 return
+            except self._UNRECOVERABLE_FILL_ERRORS:
+                # 不可恢复：不重试、不包装，直接把语义化错误交给上层。
+                raise
             except Exception as exc:  # noqa: BLE001
                 # 只捕普通异常：让 CancelledError 正常冒泡，不吞掉协程取消（T2.5）。
                 last = exc

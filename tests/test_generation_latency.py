@@ -17,8 +17,11 @@ import pytest
 
 from claude_web import config
 from claude_web.browser import selectors
+from claude_web.browser.dom_adapter import ClaudeDOMAdapter
 from claude_web.completion.generator import ReplyGenerator
 from claude_web.errors import (
+    AuthenticationRequiredError,
+    ComposerNotFoundError,
     GenerationStalledError,
     PromptSubmissionError,
     ReplyNotFoundError,
@@ -291,3 +294,49 @@ def test_quota_modal_seen_at_submit_does_not_mask_a_real_stall(
     with pytest.raises(GenerationStalledError) as excinfo:
         asyncio.run(ReplyGenerator().generate(page, "hi"))
     assert excinfo.value.code.value != "usage_limit_reached"
+
+
+class _CountingFillDOM(ClaudeDOMAdapter):
+    """把 ``fill_composer`` 换成可脚本化的失败源，统计被调用次数（T3.2）。"""
+
+    def __init__(self, error: BaseException) -> None:
+        super().__init__()
+        self._error = error
+        self.fill_calls = 0
+
+    async def fill_composer(self, page: Any, text: str) -> None:  # type: ignore[override]
+        self.fill_calls += 1
+        raise self._error
+
+
+def test_fill_does_not_retry_unrecoverable_composer_missing(monkeypatch, default_timing):
+    """T3.2：输入区**不存在**是不可恢复错误——不叠加重试，原样快速冒泡。"""
+    # 即使把外层重试预算调到最大，也不该发生第二次 fill。
+    monkeypatch.setattr(config, "MAX_UPSTREAM_RETRIES", 3)
+    dom = _CountingFillDOM(ComposerNotFoundError("填充前找不到输入区"))
+    page = FakePage()
+    with pytest.raises(ComposerNotFoundError):
+        asyncio.run(ReplyGenerator(dom=dom).generate(page, "hi"))
+    assert dom.fill_calls == 1
+
+
+def test_fill_does_not_retry_authentication_required(monkeypatch, default_timing):
+    """T3.2：登录态失效属不可恢复——不重试，直接把语义化错误交给上层。"""
+    monkeypatch.setattr(config, "MAX_UPSTREAM_RETRIES", 3)
+    dom = _CountingFillDOM(AuthenticationRequiredError("未登录"))
+    page = FakePage()
+    with pytest.raises(AuthenticationRequiredError):
+        asyncio.run(ReplyGenerator(dom=dom).generate(page, "hi"))
+    assert dom.fill_calls == 1
+
+
+def test_fill_retries_recoverable_transient_failure(monkeypatch, default_timing):
+    """T3.2：瞬时、可恢复的写入失败仍按 ``MAX_UPSTREAM_RETRIES`` 重试。"""
+    monkeypatch.setattr(config, "MAX_UPSTREAM_RETRIES", 2)
+    monkeypatch.setattr(config, "RETRY_BACKOFF_S", 0.0)
+    dom = _CountingFillDOM(RuntimeError("DOM 抖动"))
+    page = FakePage()
+    with pytest.raises(RuntimeError):
+        asyncio.run(ReplyGenerator(dom=dom).generate(page, "hi"))
+    # 外层 attempts = MAX_UPSTREAM_RETRIES + 1 = 3
+    assert dom.fill_calls == 3

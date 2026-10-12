@@ -78,7 +78,7 @@
 ## 阶段 3：错误语义与配置
 
 - [ ] **D3.1** 内部错误码（来源 4.6）：新增 `InternalError`（500），`_unhandled_handler` 与流式兜底不再把内部 bug 包成 `NotReadyError`。文件：`errors.py`、`server.py`、`tests/`。
-- [ ] **D3.2** 去掉叠加重试（来源 4.6）：`fill_composer` 已重试 `FILL_RETRIES`；`generator._fill` 只对**可恢复的写入失败**再重试，`ComposerNotFound` 这类不可恢复错误不重试。文件：`generator.py`、`dom_adapter.py`、`tests/test_generation_latency.py`。
+- [x] **D3.2** 去掉叠加重试（来源 4.6）：`fill_composer` 已重试 `FILL_RETRIES`；`generator._fill` 只对**可恢复的写入失败**再重试，`ComposerNotFound` 这类不可恢复错误不重试。文件：`generator.py`、`dom_adapter.py`、`tests/test_generation_latency.py`。
 - [ ] **D3.3** 额度归因收窄（来源 4.6）：只在「没有新回复」或「弹窗仍在页面上」时报 `UsageLimitError`；已有正文后的停滞仍报停滞。文件：`generator.py`、`tests/test_generation_latency.py`。
 - [ ] **D3.4** 失败类别指标（来源 4.6、第 5 节）：为 `usage_limit_reached`、`prompt_submission_failed`、`reply_not_found`、`context_limit_reached`、取消各加计数。文件：`metrics.py`、`service.py`。
 - [ ] **D3.5** 配置路径与列表解析（来源 4.8）

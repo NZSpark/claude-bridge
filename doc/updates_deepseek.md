@@ -40,6 +40,7 @@
 | D2.5 / T2.7 | 提交前处理「页面仍在生成」（只点确认过的停止控件） | `dom_adapter.settle_before_submit` | `fbc9a7e` |
 | D3.1 / T3.1 | `InternalError`(500)，内部 bug 不再伪装 503 | `errors.py:173`; `server.py:186-188,439` | `da78a10` |
 | D3.3 / T3.3 | 额度归因收窄：仅在「现在仍有弹窗」或「本轮无正文」时报额度 | `generator.py` 失败归因段 | `f8758a7` |
+| D3.2 / T3.2 | 去掉叠加重试：`_fill` 只对可恢复写入失败重试，不可恢复错误（输入区缺失 / 登录失效 / 提交已耗尽）快速冒泡 | `generator.py` `_UNRECOVERABLE_FILL_ERRORS` | 本次 |
 
 > **D3.3 落地细节（本次）**：条件收窄为 `if quota_now or (limit_modal_seen and not has_text_now):`。回归测试 `test_quota_modal_seen_at_submit_does_not_mask_a_real_stall` 构造「先自述在生成、随后停止信号且正文不再增长」的停滞；因默认 `STALL_S(30) > SETTLE_S(2.5)`，有正文的停滞分支不可达，测试显式把 `STALL_S` 降到 `1.0` 让停滞先于落定触发，断言抛 `GenerationStalledError` 且错误码 ≠ `usage_limit_reached`。
 
@@ -51,7 +52,7 @@
 - **D2.6 / T2.6** — 提交**之后**失败的桶标记「状态不确定」，交给 D1.5 决定是否重播，避免重复发同一增量。依赖 D1.5。
 
 ### P1（错误语义与配置）
-- **D3.2 / T3.2** — 去掉叠加重试边界：`_fill`（`generator.py:141`）当前仍 `except Exception` 无差别重试；应只对**可恢复的写入失败**再重试，`ComposerNotFound` / 登录类错误快速失败。
+- ~~**D3.2 / T3.2** — 去掉叠加重试边界。~~ **已完成**：`generator._fill` 新增 `_UNRECOVERABLE_FILL_ERRORS`（`ComposerNotFoundError` / `AuthenticationRequiredError` / `ChallengeRequiredError` / `PromptSubmissionError`），命中即冒泡不重试；其余瞬时失败仍按 `MAX_UPSTREAM_RETRIES` 重试。回归测试三条（不可恢复不重试、登录失效不重试、可恢复重试次数）。
 - **D3.4 / T3.4** — 失败类别指标：为 `usage_limit_reached` / `prompt_submission_failed` / `reply_not_found` / `context_limit_reached` / 取消各加计数（`metrics.py` 目前只有 `request_cancelled_total`）。
 - **D3.5 / T3.5** — 配置路径与列表解析：`SESSION_FILE` / `USER_DATA_DIR` / `TASK_FILE_DIR` / `OUTPUT_DIR` 相对路径以 `PROJECT_ROOT` 解析；选择器配置**只按 `||` 切分**（避免 `:is(a,b)` 被切坏）；`LINK_ALLOWED_HOSTS=*` 启动强告警。
 - **D3.6 / T3.6** — 启动校验与摘要日志：旧键（`STABLE_POLLS` / `QUIET_POLLS` / `STALL_POLLS`）告警；校验 `BUCKET_LOCK_TIMEOUT_S >= CLAUDE_TIMEOUT`、`SETTLE_NO_SIGNAL_S >= SETTLE_S`、`STALL_S > SUBMIT_LOST_S`；生效值写摘要日志（不含密钥）。
