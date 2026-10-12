@@ -61,7 +61,7 @@
 - ~~**D3.7 / T3.7** — 会话比较与绑定。~~ **已完成（URL 精确比较部分）**：新增 `_conversation_key(url)`，`_same_conversation` 与 `lifecycle.link` 落点校验都改为解析 URL、按主机 + 规范化路径**精确**比对（忽略查询串 / 片段 / 末尾斜杠，其余逐字相同）。修掉了 `startswith(target[:len(target)-1])` 把「会话 ID 只差末位」误判成同一条的 bug。**未做**：绑定桶触顶后换新会话 / 明确报错（仍待办）。
 
 ### P2（API、提示词、日志、工程化）
-- **D4.1 / T4.1** — Responses 真流式：复用 chat 路径的「队列 + 保活 + 断连 + 错误事件」骨架（见 §4 的 `_KEEPALIVE`）。
+- ~~**D4.1 / T4.1** — Responses 真流式。~~ **已完成**：`_stream_responses` 改为与 chat 路径同一骨架（后台 produce + 队列 + 保活 + 断连取消 + 错误事件），生成期间逐段发 `response.output_text.delta`。`responses_adapter` 新增三个增量事件构造函数，`response_events` 复用它们。**顺带消除死键**：写死的 `_KEEPALIVE = 10.0` 换成 `_keepalive_s()` 读 `config.STREAM_KEEPALIVE_S`（§4 表格里的 `STREAM_KEEPALIVE_S` 未接线问题由此关闭）。回归六条见 `tests/test_responses.py`。**发现的真实语义问题**：网页重写回复时纯增量会与最终文本不一致（测试用 `snapshots=["答复一","最终完整答复"]` 复现）；处理方式与 chat 路径对齐——重写后停止发增量，最终文本以 `response.completed` 为准，并在测试里显式锁定该契约。
 - **D4.2 / T4.2** — `store_thread` 保留 `tool_calls` / `tool_call_id`，保证 `previous_response_id` 续接工具循环不断链。
 - **D4.3 / T4.3** — 补齐 Responses 事件集并用真实客户端（Codex CLI 等）探测，结果记入 `doc/tasks.md`。
 - **D4.4 / T4.4** — 流式细节：网页重写回复时加 `stream_rewritten_total`；`on_delta` 仅在内容变化时回调；支持 `stream_options.include_usage`；已见回复后读取节点短暂失败时保留上一次文本。

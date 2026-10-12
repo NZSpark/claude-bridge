@@ -103,3 +103,115 @@ def test_responses_route_gated_by_config(monkeypatch, tmp_path):
     payload = resp.json()
     assert payload["object"] == "response"
     assert payload["output_text"] == "ok"
+
+
+# ==================== 真流式（T4.1 / D4.1）====================
+
+
+def _event_types(sse_text: str) -> list:
+    return [
+        line.split(": ", 1)[1]
+        for line in sse_text.splitlines()
+        if line.startswith("event: ")
+    ]
+
+
+def test_responses_stream_emits_incremental_deltas(monkeypatch, tmp_path):
+    """真流式：生成期间就要吐出 ``output_text.delta``，而不是等完成后一次性发。"""
+    page = FakePage(snapshots=["答复一", "答复一加上后续"], generating_plan=[True, False])
+    svc = make_service(page, tmp_path)
+    monkeypatch.setattr(server, "service", svc)
+    monkeypatch.setattr(config, "ENABLE_RESPONSES_API", True)
+    client = TestClient(server.app)
+
+    resp = client.post("/v1/responses", json={"input": "hi", "stream": True})
+    assert resp.status_code == 200
+    types = _event_types(resp.text)
+    assert types[0] == "response.created"
+    assert types[-1] == "response.completed"
+    # 关键：至少一条增量（此前伪流式只会有 created + completed）。
+    assert "response.output_text.delta" in types
+    assert resp.text.count("response.output_text.delta") >= 1
+
+
+def test_responses_stream_appends_tail_when_not_rewritten(monkeypatch, tmp_path):
+    """无重写时：增量拼接 == 最终正文（尾部补齐，不重复、不漏字）。"""
+    import json as _json
+
+    # 页面文本只增不改：答复一 -> 答复一加上后续。
+    page = FakePage(snapshots=["答复一", "答复一加上后续"], generating_plan=[True, False])
+    svc = make_service(page, tmp_path)
+    monkeypatch.setattr(server, "service", svc)
+    monkeypatch.setattr(config, "ENABLE_RESPONSES_API", True)
+    client = TestClient(server.app)
+
+    resp = client.post("/v1/responses", json={"input": "hi", "stream": True})
+    deltas = []
+    completed_text = None
+    for line in resp.text.splitlines():
+        if line.startswith("data: "):
+            payload = _json.loads(line[len("data: "):])
+            if payload.get("type") == "response.output_text.delta":
+                deltas.append(payload["delta"])
+            elif payload.get("type") == "response.completed":
+                completed_text = payload["response"]["output_text"]
+    assert "".join(deltas) == completed_text == "答复一加上后续"
+
+
+def test_responses_stream_rewrite_keeps_completed_text_authoritative(monkeypatch, tmp_path):
+    """网页重写回复：已发出的增量无法撤回，但 completed 必须给最终完整文本。"""
+    import json as _json
+
+    page = FakePage(snapshots=["答复一", "最终完整答复"], generating_plan=[True, False])
+    svc = make_service(page, tmp_path)
+    monkeypatch.setattr(server, "service", svc)
+    monkeypatch.setattr(config, "ENABLE_RESPONSES_API", True)
+    client = TestClient(server.app)
+
+    resp = client.post("/v1/responses", json={"input": "hi", "stream": True})
+    completed_text = None
+    delta_count = 0
+    for line in resp.text.splitlines():
+        if line.startswith("data: "):
+            payload = _json.loads(line[len("data: "):])
+            if payload.get("type") == "response.output_text.delta":
+                delta_count += 1
+            elif payload.get("type") == "response.completed":
+                completed_text = payload["response"]["output_text"]
+    # 重写后不再追加误导性增量，最终文本以 completed 为准。
+    assert completed_text == "最终完整答复"
+    assert delta_count == 1
+
+
+def test_responses_stream_route_passes_request_for_disconnect(monkeypatch, tmp_path):
+    """路由必须把 ``request`` 传进生成器，否则断连检测失效（真流式的前置条件）。"""
+    import inspect
+
+    sig = inspect.signature(server._stream_responses)
+    assert "request" in sig.parameters
+
+
+def test_stream_keepalive_config_is_wired(monkeypatch):
+    """``STREAM_KEEPALIVE_S`` 必须真正被读（此前写死 ``_KEEPALIVE = 10.0``）。"""
+    monkeypatch.setattr(config, "STREAM_KEEPALIVE_S", 0.25)
+    assert server._keepalive_s() == 0.25
+    # 下限保护：0 / 负值不应导致忙轮询。
+    monkeypatch.setattr(config, "STREAM_KEEPALIVE_S", 0.0)
+    assert server._keepalive_s() > 0
+
+
+def test_response_event_helpers_compose():
+    """新增的三个增量事件构造函数与 ``response_events`` 的事件名一致。"""
+    from claude_web.api.responses_adapter import (
+        response_completed_event,
+        response_created_event,
+        response_text_delta_event,
+    )
+
+    assert _event_types(response_created_event("resp_1", "m")) == ["response.created"]
+    assert _event_types(response_text_delta_event("resp_1", "x")) == [
+        "response.output_text.delta"
+    ]
+    assert _event_types(response_completed_event("resp_1", "m", text="x")) == [
+        "response.completed"
+    ]

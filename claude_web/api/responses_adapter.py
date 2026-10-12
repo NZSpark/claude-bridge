@@ -214,6 +214,53 @@ def build_response_object(
     }
 
 
+def response_created_event(
+    response_id: str,
+    model: str,
+    *,
+    created: Optional[int] = None,
+) -> str:
+    """流式开头事件：真流式路径先发它，让客户端尽早拿到 ``response.created``。"""
+    created = created or int(time.time())
+    return sse_event(
+        "response.created",
+        {"response": {"id": response_id, "model": model, "created_at": created}},
+    )
+
+
+def response_text_delta_event(response_id: str, delta: str) -> str:
+    """增量正文事件：真流式路径每收到一段增量就发一条。"""
+    return sse_event(
+        "response.output_text.delta",
+        {"item_id": response_id, "delta": delta},
+    )
+
+
+def response_completed_event(
+    response_id: str,
+    model: str,
+    *,
+    text: str = "",
+    tool_calls: Optional[List[ToolCall]] = None,
+    created: Optional[int] = None,
+) -> str:
+    """收尾事件：带完整 response 对象，文本 / 工具调用二选一。"""
+    created = created or int(time.time())
+    calls = list(tool_calls or [])
+    return sse_event(
+        "response.completed",
+        {
+            "response": build_response_object(
+                ChatTask(messages=[], model=model, bucket=""),
+                text=text,
+                tool_calls=calls,
+                response_id=response_id,
+                created=created,
+            )
+        },
+    )
+
+
 def response_events(
     response_id: str,
     model: str,
@@ -225,9 +272,7 @@ def response_events(
     """构造一次完整（非增量）Responses 流式事件序列。"""
     created = created or int(time.time())
     calls = list(tool_calls or [])
-    events: List[str] = [
-        sse_event("response.created", {"response": {"id": response_id, "model": model, "created_at": created}})
-    ]
+    events: List[str] = [response_created_event(response_id, model, created=created)]
     if calls:
         for call in calls:
             events.append(
@@ -237,19 +282,10 @@ def response_events(
                 )
             )
     elif text:
-        events.append(sse_event("response.output_text.delta", {"item_id": response_id, "delta": text}))
+        events.append(response_text_delta_event(response_id, text))
     events.append(
-        sse_event(
-            "response.completed",
-            {
-                "response": build_response_object(
-                    ChatTask(messages=[], model=model, bucket=""),
-                    text=text,
-                    tool_calls=calls,
-                    response_id=response_id,
-                    created=created,
-                )
-            },
+        response_completed_event(
+            response_id, model, text=text, tool_calls=calls, created=created
         )
     )
     return events
@@ -271,5 +307,8 @@ __all__ = [
     "to_task_from_responses",
     "build_response_object",
     "response_events",
+    "response_created_event",
+    "response_text_delta_event",
+    "response_completed_event",
     "store_thread",
 ]

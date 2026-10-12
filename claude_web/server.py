@@ -25,7 +25,10 @@ from .api.chat_adapter import (
 )
 from .api.responses_adapter import (
     build_response_object,
+    response_completed_event,
+    response_created_event,
     response_events,
+    response_text_delta_event,
     store_thread,
     to_task_from_responses,
 )
@@ -373,7 +376,7 @@ async def responses(request: Request):
             )
         if task.stream:
             return StreamingResponse(
-                _stream_responses(task, service, response_id),
+                _stream_responses(task, service, request, response_id),
                 media_type="text/event-stream",
                 headers=build_sse_headers(),
             )
@@ -450,7 +453,10 @@ async def _run_with_disconnect_guard(request: Request, svc: ChatService, task: C
 
 # ==================== 流式实现 ====================
 
-_KEEPALIVE = 10.0
+#: SSE 保活间隔：从配置读取（T4.1 / D4.1），两条流式路径共用。
+#: 此前是写死的 ``_KEEPALIVE = 10.0``，导致 ``STREAM_KEEPALIVE_S`` 声明了却从未生效。
+def _keepalive_s() -> float:
+    return max(0.1, float(config.STREAM_KEEPALIVE_S))
 
 
 async def _stream_bridge_reply(task: ChatTask, reply: str) -> AsyncIterator[str]:
@@ -499,7 +505,7 @@ async def _stream_chat_completion(
                 cancel.set()
                 break
             try:
-                kind, payload = await asyncio.wait_for(queue.get(), timeout=_KEEPALIVE)
+                kind, payload = await asyncio.wait_for(queue.get(), timeout=_keepalive_s())
             except (asyncio.TimeoutError, TimeoutError):
                 yield sse_comment()
                 continue
@@ -549,17 +555,98 @@ async def _stream_bridge_responses(
         yield event
 
 
-async def _stream_responses(task: ChatTask, svc: ChatService, response_id: str) -> AsyncIterator[str]:
-    """Responses API 的简化流式：完成后再输出事件序列（仍是合法 SSE）。"""
-    outcome = await svc.run(task)
-    store_thread(response_id, task.messages, outcome.result.text)
-    for event in response_events(
-        response_id,
-        task.model,
-        text=outcome.result.text,
-        tool_calls=outcome.result.tool_calls,
-    ):
-        yield event
+async def _stream_responses(
+    task: ChatTask, svc: ChatService, request: Request, response_id: str
+) -> AsyncIterator[str]:
+    """Responses API 真流式：复用 chat 路径的「队列 + 保活 + 断连 + 错误事件」骨架。
+
+    此前是伪流式——先 ``await svc.run(task)`` 拿到完整结果再一次性吐事件，客户端在
+    整个生成期间收不到任何增量，也拿不到保活（T4.1 / D4.1）。现在改为：
+
+    * 生成期间逐段发 ``response.output_text.delta``；
+    * 空闲超过 ``STREAM_KEEPALIVE_S`` 发 SSE 注释保活；
+    * 客户端断开即置取消标志，桶锁在 ``service.run`` 的 ``finally`` 里释放；
+    * 失败发 ``sse_error`` + 收尾，不把内部异常伪装成空回复。
+    """
+    queue: "asyncio.Queue" = asyncio.Queue()
+    cancel = asyncio.Event()
+
+    async def on_delta(text: str) -> None:
+        await queue.put(("delta", text))
+
+    async def produce() -> None:
+        try:
+            outcome = await svc.run(
+                task, on_delta=on_delta, cancel=lambda: cancel.is_set()
+            )
+            await queue.put(("result", outcome))
+        except BridgeError as exc:
+            await queue.put(("error", exc))
+        except asyncio.CancelledError:  # pragma: no cover - 客户端断开
+            raise
+        except Exception as exc:  # noqa: BLE001
+            await queue.put(
+                ("error", InternalError("流式生成失败", detail={"error": type(exc).__name__}))
+            )
+        finally:
+            await queue.put(("end", None))
+
+    producer = asyncio.create_task(produce())
+    sent = ""
+    rewritten = False
+    try:
+        yield response_created_event(response_id, task.model)
+        while True:
+            if await request.is_disconnected():
+                cancel.set()
+                break
+            try:
+                kind, payload = await asyncio.wait_for(queue.get(), timeout=_keepalive_s())
+            except (asyncio.TimeoutError, TimeoutError):
+                yield sse_comment()
+                continue
+            if kind == "delta":
+                piece, reset = delta_piece(sent, payload)
+                if reset is not None:
+                    # 网页重写了回复：无法撤回已发出的增量，停止再发，避免重复错误内容。
+                    # 与 chat 路径同一语义；最终文本在 ``response.completed`` 里如实给出。
+                    rewritten = True
+                elif piece:
+                    sent = payload
+                    yield response_text_delta_event(response_id, piece)
+            elif kind == "result":
+                outcome = payload
+                store_thread(response_id, task.messages, outcome.result.text)
+                final = outcome.result.text
+                # 未发生重写时才补齐增量没覆盖到的尾部；重写场景增量已不可信，
+                # 只把完整最终文本放进 ``response.completed``。
+                if (
+                    not rewritten
+                    and not outcome.result.has_tool_calls
+                    and final.startswith(sent)
+                ):
+                    tail = final[len(sent):]
+                    if tail:
+                        yield response_text_delta_event(response_id, tail)
+                yield response_completed_event(
+                    response_id,
+                    task.model,
+                    text=final,
+                    tool_calls=outcome.result.tool_calls,
+                )
+                return
+            elif kind == "error":
+                yield sse_error(payload.message, payload.code.value)
+                return
+            elif kind == "end":
+                return
+    finally:
+        if not producer.done():
+            cancel.set()
+            try:
+                await asyncio.wait_for(producer, timeout=5)
+            except (asyncio.TimeoutError, TimeoutError, asyncio.CancelledError):
+                producer.cancel()
 
 
 __all__ = [

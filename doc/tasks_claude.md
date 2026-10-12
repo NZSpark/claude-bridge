@@ -92,7 +92,7 @@
 
 ## 阶段 4：API 与提示词
 
-- [ ] **T4.1** Responses 真流式（来源 4.4）：复用 chat 路径的队列 + 保活 + 断连 + 错误事件；`STREAM_KEEPALIVE_S` 在两条路径统一使用。文件：`server.py`、`api/responses_adapter.py`、`tests/test_responses.py`。
+- [x] **T4.1** Responses 真流式（来源 4.4）（与 D4.1 同一处落地，见 `doc/updates_deepseek.md`）：复用 chat 路径的队列 + 保活 + 断连 + 错误事件；`STREAM_KEEPALIVE_S` 在两条路径统一使用。文件：`server.py`、`api/responses_adapter.py`、`tests/test_responses.py`。
 - [ ] **T4.2** `store_thread` 保留 `tool_calls` 与 `tool_call_id`（来源 4.4）：保证 `previous_response_id` 续接工具循环不断链。
 - [ ] **T4.3** 补齐 Responses 事件集并做真实客户端探测（来源 4.4）：`output_item.added|done`、`output_text.done` 等；用 Codex CLI 之类真实客户端验证，结果记入 `doc/tasks.md`。
 - [ ] **T4.4** 流式细节（来源 4.10）
