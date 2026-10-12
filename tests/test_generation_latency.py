@@ -185,6 +185,18 @@ def test_settle_does_not_fire_while_page_still_generating(
     assert clock.total == pytest.approx(4 * 0.4 + config.SETTLE_S, abs=0.9)
 
 
+def test_cancel_raises_cancelled_not_stalled(clock, monkeypatch, default_timing):
+    """取消要抛 GenerationCancelledError，而不是被当成停滞（T2.5）。"""
+    from claude_web.errors import GenerationCancelledError
+
+    monkeypatch.setattr(config, "MAX_UPSTREAM_RETRIES", 0)
+    page = FakePage(snapshots=["部分"], generating_plan=[True])
+    with pytest.raises(GenerationCancelledError):
+        asyncio.run(
+            ReplyGenerator().generate(page, "hi", cancel=lambda: True)
+        )
+
+
 def test_hard_timeout_truncates_when_page_still_generating(
     clock: VirtualClock, monkeypatch, default_timing
 ):

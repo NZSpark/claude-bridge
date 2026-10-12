@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import asyncio
 
+import pytest
+
 from claude_web.models import ChatTask, NormalizedMessage
 from claude_web.prompting import delta_messages
 from tests.fakes import FakePage, make_service
@@ -294,3 +296,22 @@ def test_consistent_history_prefix_is_not_flagged(tmp_path):
     _next_turn(page, "答复二")
     outcome = asyncio.run(service.run(_task(TURN_2)))
     assert not any("分叉" in note for note in outcome.conversation.notes)
+
+
+# ==================== 取消语义（T2.5）====================
+
+
+def test_cancel_is_not_recorded_as_failure(tmp_path):
+    """取消不计入失败 / 超时统计，也不写会话 last_error（T2.5）。"""
+    from claude_web.errors import GenerationCancelledError
+
+    page = FakePage(snapshots=["部分回复"], generating_plan=[True])
+    service = make_service(page, tmp_path)
+    with pytest.raises(GenerationCancelledError):
+        asyncio.run(service.run(_task(TURN_1), cancel=lambda: True))
+    state = service.lifecycle.store.state(BUCKET)
+    assert state.last_error is None
+    snap = service.metrics.snapshot()["counters"]
+    assert snap["request_cancelled_total"] == 1
+    assert snap["request_error_total"] == 0
+    assert snap["request_timeout_total"] == 0

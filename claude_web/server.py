@@ -35,8 +35,8 @@ from .browser.selectors import SELECTOR_VERSION
 from .errors import (
     BridgeError,
     ErrorCode,
+    InternalError,
     InvalidRequestError,
-    NotReadyError,
     UnauthorizedError,
 )
 from .logging_setup import current_request_id, log_context, new_request_id, redact
@@ -183,7 +183,9 @@ async def _bridge_error_handler(request: Request, exc: BridgeError) -> JSONRespo
 @app.exception_handler(Exception)
 async def _unhandled_handler(request: Request, exc: Exception) -> JSONResponse:
     logger.warning("[服务] 未处理异常：%s", type(exc).__name__)
-    safe = NotReadyError("服务内部错误", detail={"error": type(exc).__name__})
+    # 内部 bug 用 500（InternalError），不要伪装成 503「未就绪」——那会让客户端
+    # 当成登录 / 页面问题去重试（T3.1）。
+    safe = InternalError("服务内部错误", detail={"error": type(exc).__name__})
     return _error_response(safe, current_request_id())
 
 
@@ -434,7 +436,7 @@ async def _stream_chat_completion(
         except asyncio.CancelledError:  # pragma: no cover - 客户端断开
             raise
         except Exception as exc:  # noqa: BLE001
-            await queue.put(("error", NotReadyError("流式生成失败", detail={"error": type(exc).__name__})))
+            await queue.put(("error", InternalError("流式生成失败", detail={"error": type(exc).__name__})))
         finally:
             await queue.put(("end", None))
 

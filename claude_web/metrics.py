@@ -18,6 +18,7 @@ COUNTERS = (
     "request_timeout_total",
     "request_retry_total",
     "request_context_limit_total",
+    "request_cancelled_total",
     "browser_unavailable_total",
     "browser_selector_miss_total",
     "reply_extraction_failure_total",

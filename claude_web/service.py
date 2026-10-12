@@ -16,7 +16,13 @@ from .completion.generator import DeltaCallback, GenerationResult, ReplyGenerato
 from .completion.lifecycle import Conversation, SessionLifecycle
 from .driver import ClaudeWebDriver
 from .driver import driver as default_driver
-from .errors import BridgeError, ContextLimitError, NotReadyError, SessionBusyError
+from .errors import (
+    BridgeError,
+    ContextLimitError,
+    GenerationCancelledError,
+    NotReadyError,
+    SessionBusyError,
+)
 from .metrics import metrics as default_metrics
 from .models import ChatTask
 from .session.lock import BucketLockManager
@@ -169,6 +175,10 @@ class ChatService:
         snapshot.state = "failed"
         snapshot.last_error = code
         self.tasks.save(snapshot)
+        # 取消不是上游故障：单独计数，不写会话 last_error，也不计入失败 / 超时统计（T2.5）。
+        if isinstance(exc, GenerationCancelledError):
+            self.metrics.inc("request_cancelled_total")
+            raise exc
         self.lifecycle.note_error(bucket, code)
         self.metrics.inc("request_error_total")
         if isinstance(exc, ContextLimitError):

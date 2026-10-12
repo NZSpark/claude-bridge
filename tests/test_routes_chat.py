@@ -116,6 +116,21 @@ def test_user_field_used_for_bucketing(build_client):
     assert svc.driver.pool.buckets() == ["my-client"]
 
 
+def test_internal_error_maps_to_500(build_client, monkeypatch):
+    """内部 bug 用 500，而不是伪装成 503「未就绪」（T3.1）。"""
+    client, svc = build_client(FakePage(snapshots=["x"]))
+
+    async def _boom(*args, **kwargs):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(svc, "_run_locked", _boom)
+    # 让 TestClient 不把未处理异常直接抛出，从而能看到注册的 Exception 处理器的响应。
+    client = TestClient(server.app, raise_server_exceptions=False)
+    resp = _chat(client)
+    assert resp.status_code == 500
+    assert resp.json()["error"]["code"] == "internal_error"
+
+
 def test_authentication_failure_maps_to_503(build_client):
     client, _ = build_client(FakePage(authenticated=False))
     resp = _chat(client)

@@ -31,6 +31,7 @@ from ..browser.dom_adapter import ClaudeDOMAdapter
 from ..end_detection import EndLimits, EndState, IdleClock, evaluate_poll
 from ..errors import (
     ContextLimitError,
+    GenerationCancelledError,
     GenerationStalledError,
     GenerationTimeoutError,
     PromptSubmissionError,
@@ -145,7 +146,8 @@ class ReplyGenerator:
             try:
                 await self.dom.fill_composer(page, prompt)
                 return
-            except BaseException as exc:  # noqa: BLE001
+            except Exception as exc:  # noqa: BLE001
+                # 只捕普通异常：让 CancelledError 正常冒泡，不吞掉协程取消（T2.5）。
                 last = exc
                 if attempt < attempts - 1:
                     await asyncio.sleep(config.RETRY_BACKOFF_S * (attempt + 1))
@@ -247,7 +249,8 @@ class ReplyGenerator:
             polls += 1
             now = time.monotonic()
             if cancel is not None and cancel():
-                raise GenerationStalledError("生成已取消", detail={"polls": polls})
+                # 取消不是停滞：用独立错误类，调用方据此不计入超时 / 失败统计（T2.5）。
+                raise GenerationCancelledError("生成已取消", detail={"polls": polls})
 
             read = await self.extractor.read_new(page, baseline)
             last_read = read

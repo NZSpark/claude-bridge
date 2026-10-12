@@ -28,6 +28,8 @@ class ErrorCode(str, Enum):
     REPLY_EXTRACTION_FAILED = "reply_extraction_failed"
     GENERATION_TIMEOUT = "generation_timeout"
     GENERATION_STALLED = "generation_stalled"
+    GENERATION_CANCELLED = "generation_cancelled"
+    INTERNAL_ERROR = "internal_error"
     CONTEXT_LIMIT_REACHED = "context_limit_reached"
     USAGE_LIMIT_REACHED = "usage_limit_reached"
     SESSION_CONFLICT = "session_conflict"
@@ -58,6 +60,8 @@ _HTTP_STATUS: Dict[ErrorCode, int] = {
     ErrorCode.SESSION_CONFLICT: 502,
     ErrorCode.GENERATION_TIMEOUT: 504,
     ErrorCode.GENERATION_STALLED: 504,
+    ErrorCode.GENERATION_CANCELLED: 499,
+    ErrorCode.INTERNAL_ERROR: 500,
     ErrorCode.USAGE_LIMIT_REACHED: 429,
     ErrorCode.TOOL_CALL_PARSE_ERROR: 422,
 }
@@ -154,6 +158,26 @@ class GenerationTimeoutError(BrowserError):
 
 class GenerationStalledError(BrowserError):
     code = ErrorCode.GENERATION_STALLED
+
+
+class GenerationCancelledError(BridgeError):
+    """本轮生成被调用方取消（客户端断连 / 显式取消）。
+
+    刻意**不是** :class:`GenerationStalledError`：取消不是上游故障，不该计入超时 / 失败
+    统计，也不该写进会话 ``last_error``（T2.5）。HTTP 499（客户端已关闭请求）。
+    """
+
+    code = ErrorCode.GENERATION_CANCELLED
+
+
+class InternalError(BridgeError):
+    """桥接层内部 bug（非上游 / 非客户端问题）。
+
+    单独 500：此前 ``_unhandled_handler`` 把任意程序错误包成 ``NotReadyError``（503），
+    客户端会当成「登录 / 页面问题」去重试（T3.1）。
+    """
+
+    code = ErrorCode.INTERNAL_ERROR
 
 
 class ContextLimitError(BrowserError):
