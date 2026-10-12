@@ -5,13 +5,14 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 
 import pytest
 from fastapi.testclient import TestClient
 
 from claude_web import config, server
-from claude_web.errors import SessionBusyError
+from claude_web.errors import GenerationCancelledError, SessionBusyError
 from tests.fakes import FakePage, make_service
 
 DEFAULT_LINK = "https://claude.ai/chat/b646548c-d27c-4dc7-9205-3134ac5d9c8d"
@@ -333,3 +334,64 @@ def test_health_metrics_diagnostics_and_models(build_client):
     assert "metrics" in diag
     models = client.get("/v1/models").json()
     assert models["data"][0]["id"] == "claude-web"
+
+
+# ---- 非流式请求的断连保护（T2.4 / D2.4）----
+
+
+class _FakeRequest:
+    """最小 Request 替身：``is_disconnected`` 由 ``plan`` 脚本化。"""
+
+    def __init__(self, plan) -> None:
+        self._plan = list(plan)
+        self.calls = 0
+
+    async def is_disconnected(self) -> bool:
+        value = self._plan[min(self.calls, len(self._plan) - 1)]
+        self.calls += 1
+        return value
+
+
+class _ScriptedService:
+    """记录 ``cancel`` 被观察到的时机，并在取消时抛 ``GenerationCancelledError``。"""
+
+    def __init__(self) -> None:
+        self.started = asyncio.Event()
+        self.cancelled = False
+
+    async def run(self, task, *, on_delta=None, cancel=None):
+        self.started.set()
+        while True:
+            if cancel is not None and cancel():
+                self.cancelled = True
+                raise GenerationCancelledError("生成已取消")
+            await asyncio.sleep(0.01)
+
+
+def test_non_stream_disconnect_cancels_generation(monkeypatch):
+    """客户端断开后，非流式请求也要取消生成并释放桶锁，而不是空跑到超时（T2.4）。"""
+    monkeypatch.setattr(server, "_DISCONNECT_POLL_S", 0.001)
+    svc = _ScriptedService()
+    request = _FakeRequest([False, False, True])  # 第三次轮询时判定断连
+
+    async def _drive():
+        with pytest.raises(GenerationCancelledError):
+            await server._run_with_disconnect_guard(request, svc, object())
+
+    asyncio.run(_drive())
+    assert svc.cancelled is True
+
+
+def test_non_stream_connected_path_returns_outcome(monkeypatch):
+    """未断开时正常返回 ``run`` 的结果（断连保护不改变成功路径）。"""
+    monkeypatch.setattr(server, "_DISCONNECT_POLL_S", 0.001)
+    expected = object()
+
+    class _Ok:
+        async def run(self, task, *, on_delta=None, cancel=None):
+            return expected
+
+    async def _drive():
+        return await server._run_with_disconnect_guard(_FakeRequest([False]), _Ok(), object())
+
+    assert asyncio.run(_drive()) is expected

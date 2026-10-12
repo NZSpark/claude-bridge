@@ -56,7 +56,7 @@
   - 做法：新增 `GenerationCancelledError`；`_record_failure` 对它单独计数、不写会话 `last_error`；`_fill` 只捕获 `Exception`，让 `CancelledError` 冒泡。
   - 验收：取消不计入超时与失败统计，不污染 `last_error`。
 
-- [ ] **T2.4** 非流式与 Responses 路径的断连检测（来源 4.3）
+- [x] **T2.4** 非流式与 Responses 路径的断连检测（来源 4.3）
   - 文件：`claude_web/server.py`
   - 做法：非流式请求在后台任务里跑，断连时置取消标志（与流式路径同一机制）。
   - 验收：客户端断开后桶锁在一个轮询周期内释放。

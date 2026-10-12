@@ -41,6 +41,7 @@
 | D3.1 / T3.1 | `InternalError`(500)，内部 bug 不再伪装 503 | `errors.py:173`; `server.py:186-188,439` | `da78a10` |
 | D3.3 / T3.3 | 额度归因收窄：仅在「现在仍有弹窗」或「本轮无正文」时报额度 | `generator.py` 失败归因段 | `f8758a7` |
 | D3.2 / T3.2 | 去掉叠加重试：`_fill` 只对可恢复写入失败重试，不可恢复错误（输入区缺失 / 登录失效 / 提交已耗尽）快速冒泡 | `generator.py` `_UNRECOVERABLE_FILL_ERRORS` | 本次 |
+| D2.4 / T2.4 | 非流式 / Responses 路径的断连检测：后台跑 `svc.run` + 轮询 `is_disconnected`，断开即取消、快速释放桶锁 | `server.py` `_run_with_disconnect_guard` | 本次 |
 
 > **D3.3 落地细节（本次）**：条件收窄为 `if quota_now or (limit_modal_seen and not has_text_now):`。回归测试 `test_quota_modal_seen_at_submit_does_not_mask_a_real_stall` 构造「先自述在生成、随后停止信号且正文不再增长」的停滞；因默认 `STALL_S(30) > SETTLE_S(2.5)`，有正文的停滞分支不可达，测试显式把 `STALL_S` 降到 `1.0` 让停滞先于落定触发，断言抛 `GenerationStalledError` 且错误码 ≠ `usage_limit_reached`。
 
@@ -48,7 +49,7 @@
 
 ### P0（收尾正确性）
 - **D1.5(B) / T1.4b** — 指纹观测无误判后，切换为「对不上 → 换新对话并完整重播」。**风险最高**：先看日志确认零误判再切；切换须有回归测试保护。关注「相同提示词连续两轮 + 虚拟化」时纯文本指纹无法区分，优先找稳定 DOM 消息 ID（`data-testid` / `data-message-id`），找不到时**宁可重播也不要误认**。
-- **D2.4 / T2.4** — 非流式与 Responses 路径的客户端断连检测（后台任务 + 取消标志），避免客户端断开后桶锁空跑到绝对超时。
+- ~~**D2.4 / T2.4** — 非流式与 Responses 路径的客户端断连检测。~~ **已完成**：新增 `_run_with_disconnect_guard`——后台跑 `svc.run(cancel=...)`，并发轮询 `request.is_disconnected()`，断开即置取消标志，生成循环抛 `GenerationCancelledError`（499），桶锁在 `service.run` 的 `finally` 立即释放。**踩坑记录**：`finally` 里**不能** `await` 被取消的 watcher——它会卡在 `is_disconnected()` 内部不可取消的 `receive()`，把整条非流式路由拖死（实测该测试文件挂起 >8 分钟）；只发 `cancel()`、不 await。
 - **D2.6 / T2.6** — 提交**之后**失败的桶标记「状态不确定」，交给 D1.5 决定是否重播，避免重复发同一增量。依赖 D1.5。
 
 ### P1（错误语义与配置）

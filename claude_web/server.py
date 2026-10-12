@@ -332,7 +332,7 @@ async def chat_completions(request: Request):
                 media_type="text/event-stream",
                 headers=build_sse_headers(),
             )
-        outcome = await service.run(task)
+        outcome = await _run_with_disconnect_guard(request, service, task)
         response = build_completion_response(
             task,
             text=outcome.result.text,
@@ -371,7 +371,7 @@ async def responses(request: Request):
                 media_type="text/event-stream",
                 headers=build_sse_headers(),
             )
-        outcome = await service.run(task)
+        outcome = await _run_with_disconnect_guard(request, service, task)
         store_thread(response_id, task.messages, outcome.result.text)
         payload = build_response_object(
             task,
@@ -397,6 +397,49 @@ if config.DEBUG and config.ENABLE_DEBUG_DOM:
         detail, healthy = await service.driver.dom.selector_diagnostics(page, groups)
         probe = await service.driver.dom.page_probe(page, config)
         return {"selector_version": SELECTOR_VERSION, "selectors": detail, "healthy": healthy, "page": probe}
+
+
+# ==================== 非流式请求的断连保护 ====================
+
+#: 检测客户端断连的轮询间隔（秒）。断连检测本身很轻，放快一点能更快释放桶锁。
+_DISCONNECT_POLL_S = 0.5
+
+
+async def _run_with_disconnect_guard(request: Request, svc: ChatService, task: ChatTask):
+    """非流式请求也带断连检测（T2.4 / D2.4）。
+
+    流式路径靠消费生成器时读 :meth:`Request.is_disconnected` 来发现断连；非流式路径
+    此前是**裸 await**：客户端断开后桶锁会一直持到绝对超时（默认 300s），期间别的
+    请求拿不到这个桶，页面也白跑。
+
+    做法与流式一致——同一个取消机制：后台跑 ``svc.run``，并发轮询 ``is_disconnected``，
+    命中就置取消标志。生成循环读到取消后抛 :class:`GenerationCancelledError`（499），
+    桶锁在 ``service.run`` 的 ``finally`` 里立即释放。
+    """
+    cancel = asyncio.Event()
+
+    async def watch_disconnect() -> None:
+        try:
+            while not cancel.is_set():
+                if await request.is_disconnected():
+                    cancel.set()
+                    return
+                await asyncio.sleep(_DISCONNECT_POLL_S)
+        except asyncio.CancelledError:  # pragma: no cover - 正常收尾
+            raise
+        except Exception:  # noqa: BLE001 - 断连检测失败不该拖垮请求
+            return
+
+    run_task = asyncio.create_task(svc.run(task, cancel=cancel.is_set))
+    watcher = asyncio.create_task(watch_disconnect())
+    try:
+        return await run_task
+    finally:
+        # 只发取消、**不 await**：断连探测里可能正卡在 ``request.is_disconnected()``
+        # 的 ``receive()``（请求体已读完时它可能不再返回，且不一定响应取消）。
+        # 若在这里 await watcher，成功路径会被它拖死（实测会让整条非流式路由挂住）。
+        # 取消标志已置位，任务被丢弃即可，不会泄漏有意义的状态。
+        watcher.cancel()
 
 
 # ==================== 流式实现 ====================
