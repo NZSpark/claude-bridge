@@ -250,3 +250,47 @@ def test_admin_reset_runs_when_bucket_idle(tmp_path):
     asyncio.run(_scenario())
     # 页面被关闭（下一轮会重建 / 重新播种）。
     assert page.closed is True
+
+
+# ==================== 历史一致性指纹（T1.4a，只观测）====================
+
+
+def test_history_fingerprint_recorded_after_success(tmp_path):
+    """成功后把「已同步历史」指纹写进会话状态（T1.4a）。"""
+    page = FakePage(snapshots=["答复一"])
+    service = make_service(page, tmp_path)
+    asyncio.run(service.run(_task(TURN_1)))
+    state = service.lifecycle.store.state(BUCKET)
+    assert state.history_len == len(TURN_1)
+    assert state.history_digest
+
+
+def test_divergent_history_is_logged_but_does_not_reseed(tmp_path):
+    """客户端历史前缀对不上：只打日志 + notes，本轮仍复用会话（观察模式）。"""
+    page = FakePage(snapshots=["答复一"])
+    service = make_service(page, tmp_path)
+    asyncio.run(service.run(_task(TURN_1)))
+    _next_turn(page, "答复二")
+
+    # 客户端「回滚」了历史：前缀里第一轮任务被改写了。
+    divergent = [
+        ("system", "SYS"),
+        ("user", "被改写的第一轮任务"),
+        ("assistant", "答复一"),
+        ("user", "第二轮任务"),
+    ]
+    outcome = asyncio.run(service.run(_task(divergent)))
+    conversation = outcome.conversation
+    # 观察模式：不重播种，仍复用；只是加了 notes 提示。
+    assert conversation.seeded is False
+    assert any("分叉" in note for note in conversation.notes)
+
+
+def test_consistent_history_prefix_is_not_flagged(tmp_path):
+    """对照：正常追加的历史（前缀一致）不应被标记。"""
+    page = FakePage(snapshots=["答复一"])
+    service = make_service(page, tmp_path)
+    asyncio.run(service.run(_task(TURN_1)))
+    _next_turn(page, "答复二")
+    outcome = asyncio.run(service.run(_task(TURN_2)))
+    assert not any("分叉" in note for note in outcome.conversation.notes)

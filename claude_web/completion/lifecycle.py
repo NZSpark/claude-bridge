@@ -72,6 +72,9 @@ class Conversation:
     seeded: bool = True
     #: 本轮发送的系统提示摘要（下一轮系统提示变了就重新带上它）。
     system_digest: str = ""
+    #: 本轮同步进网页会话的客户端历史指纹（T1.4a，成功后记录进会话状态）。
+    history_len: int = 0
+    history_digest: str = ""
     linked_url: Optional[str] = None
     notes: List[str] = field(default_factory=list)
     prompt_build: Optional[PromptBuild] = None
@@ -80,6 +83,20 @@ class Conversation:
 def _digest(text: str) -> str:
     """系统提示的短摘要（只用于比「有没有变」，不落盘、不对外暴露）。"""
     return hashlib.sha256((text or "").encode("utf-8")).hexdigest()[:16]
+
+
+def history_fingerprint(messages: Sequence[NormalizedMessage]) -> str:
+    """客户端历史的**低敏指纹**（T1.4a）：只用于「有没有变」，不暴露正文。
+
+    对每条消息取「角色 + 正文长度 + 正文前缀摘要」，再整体做一次 SHA-256。
+    不把正文写进状态文件，也不把内容回给客户端；不同历史碰撞概率可忽略。
+    """
+    hasher = hashlib.sha256()
+    for message in messages:
+        content = message.content or ""
+        head = hashlib.sha256(content[:200].encode("utf-8")).hexdigest()[:8]
+        hasher.update(f"{message.role}:{len(content)}:{head}\n".encode("utf-8"))
+    return hasher.hexdigest()[:24]
 
 
 def _same_conversation(current_url: str, target_url: str) -> bool:
@@ -167,6 +184,25 @@ class SessionLifecycle:
         notes = list(prompt_build.notes)
         if not need_seed and include_system:
             notes.append("系统提示已变化：本轮重新带上系统指令")
+        # 历史一致性观测（T1.4a）：复用会话时，核对客户端历史是否**以上一次同步进去
+        # 的那批历史为前缀**。对不上就说明客户端历史与网页上下文已分叉（回滚 /
+        # 重新生成 / 换任务 / 压缩）。本步骤**只观测**：打日志 + notes，不改行为；
+        # 等真实任务验证无误判后再切换为触发重播种（T1.4b）。
+        if (
+            not need_seed
+            and state.history_len > 0
+            and state.history_digest
+            and len(messages) >= state.history_len
+        ):
+            current = history_fingerprint(messages[: state.history_len])
+            if current != state.history_digest:
+                logger.warning(
+                    "[会话] bucket=%s 客户端历史与网页上下文可能已分叉"
+                    "（已同步 %s 条的历史前缀指纹对不上）",
+                    bucket,
+                    state.history_len,
+                )
+                notes.append("客户端历史与网页上下文可能已分叉（仅记录，未重播种）")
         created_new = False
 
         if target_url:
@@ -197,6 +233,8 @@ class SessionLifecycle:
             created_new=created_new,
             seeded=need_seed,
             system_digest=system_digest,
+            history_len=len(messages),
+            history_digest=history_fingerprint(messages),
             linked_url=target_url,
             notes=notes,
             prompt_build=prompt_build,
@@ -214,7 +252,14 @@ class SessionLifecycle:
 
     # ---- 状态更新 ----
     def note_success(
-        self, bucket: str, *, est_tokens: int = 0, page: Any = None, system_digest: str = ""
+        self,
+        bucket: str,
+        *,
+        est_tokens: int = 0,
+        page: Any = None,
+        system_digest: str = "",
+        history_len: int = 0,
+        history_digest: str = "",
     ) -> None:
         state = self.store.state(bucket)
         state.has_history = True
@@ -224,6 +269,10 @@ class SessionLifecycle:
         state.cap_failures = 0
         state.last_error = None
         state.pending_reseed = False
+        # 记录「这一轮同步进网页会话的客户端历史」指纹，供下一轮一致性观测（T1.4a）。
+        if history_len:
+            state.history_len = int(history_len)
+            state.history_digest = history_digest or ""
         self.store.save_state(bucket, state)
         # 只有本轮真的成功发送，网页会话里才确实有了这段上下文。
         self._remember_seed(bucket, page)

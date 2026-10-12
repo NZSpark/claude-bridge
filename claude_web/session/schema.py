@@ -25,6 +25,8 @@ _SESSION_FIELDS = frozenset(
         "updated_at",
         "linked_url",
         "pending_reseed",
+        "history_len",
+        "history_digest",
     }
 )
 
@@ -74,6 +76,12 @@ class SessionState:
     linked_url: Optional[str] = None
     # 排队的一次性「下一轮重新播种」。
     pending_reseed: bool = False
+    #: 上一次成功同步进网页会话的**客户端历史**指纹（T1.4a，只用于一致性诊断）：
+    #: ``history_len`` 是当时的消息条数，``history_digest`` 是那批消息的摘要。
+    #: 下一轮若「当前历史的前 history_len 条」摘要对不上，就说明客户端历史与网页
+    #: 上下文已经分叉（回滚 / 重新生成 / 换任务 / 压缩），届时打日志提示。
+    history_len: int = 0
+    history_digest: str = ""
 
     def to_payload(self) -> Dict[str, Any]:
         return asdict(self)
@@ -86,7 +94,7 @@ class SessionState:
         for name in ("has_history", "cap_hit", "pending_reseed"):
             if name in payload:
                 setattr(state, name, bool(payload.get(name)))
-        for name in ("turns", "est_tokens", "updated_at", "cap_failures"):
+        for name in ("turns", "est_tokens", "updated_at", "cap_failures", "history_len"):
             try:
                 setattr(state, name, int(payload.get(name) or 0))
             except (TypeError, ValueError):
@@ -95,4 +103,6 @@ class SessionState:
         state.last_error = last_error if isinstance(last_error, str) else None
         linked = payload.get("linked_url")
         state.linked_url = linked.strip() if isinstance(linked, str) and linked.strip() else None
+        digest = payload.get("history_digest")
+        state.history_digest = digest if isinstance(digest, str) else ""
         return state

@@ -146,7 +146,11 @@ class ChatService:
         # 传页面与系统提示摘要：只有本轮真的成功，网页会话里才确实有了这段上下文
         # （下一轮才能只发增量），也才知道客户端是否换过系统提示。
         self.lifecycle.note_success(
-            task.bucket, page=conversation.page, system_digest=conversation.system_digest
+            task.bucket,
+            page=conversation.page,
+            system_digest=conversation.system_digest,
+            history_len=conversation.history_len,
+            history_digest=conversation.history_digest,
         )
         if result.has_tool_calls:
             self.metrics.inc("tool_call_total")
