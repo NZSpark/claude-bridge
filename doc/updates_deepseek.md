@@ -62,7 +62,7 @@
 
 ### P2（API、提示词、日志、工程化）
 - ~~**D4.1 / T4.1** — Responses 真流式。~~ **已完成**：`_stream_responses` 改为与 chat 路径同一骨架（后台 produce + 队列 + 保活 + 断连取消 + 错误事件），生成期间逐段发 `response.output_text.delta`。`responses_adapter` 新增三个增量事件构造函数，`response_events` 复用它们。**顺带消除死键**：写死的 `_KEEPALIVE = 10.0` 换成 `_keepalive_s()` 读 `config.STREAM_KEEPALIVE_S`（§4 表格里的 `STREAM_KEEPALIVE_S` 未接线问题由此关闭）。回归六条见 `tests/test_responses.py`。**发现的真实语义问题**：网页重写回复时纯增量会与最终文本不一致（测试用 `snapshots=["答复一","最终完整答复"]` 复现）；处理方式与 chat 路径对齐——重写后停止发增量，最终文本以 `response.completed` 为准，并在测试里显式锁定该契约。
-- **D4.2 / T4.2** — `store_thread` 保留 `tool_calls` / `tool_call_id`，保证 `previous_response_id` 续接工具循环不断链。
+- ~~**D4.2 / T4.2** — `store_thread` 保留 `tool_calls` / `tool_call_id`。~~ **已完成**：新增 `_message_to_payload()` 保真序列化（带非空 `tool_calls` / `tool_call_id`）；`store_thread` 增加 `tool_calls` 参数，有工具调用时记成带 `tool_calls` 的 assistant 消息；`server.py` 非流式与流式两处调用都传 `outcome.result.tool_calls`。**关键坑**：存储必须用 `ToolCall` 的**嵌套**形态（`{id,type,function:{...}}`）——回灌走 `ChatMessage(**item)`，其 `tool_calls` 是 `List[ToolCall]`，存内部扁平形态会在 pydantic 校验处 `ValidationError: tool_calls.0.function Field required`。这是测试逼出来的（我先按「与内部表示统一」写成扁平，pydantic 直接拒绝）。回归两条：工具循环续接、无工具调用时纯文本。
 - **D4.3 / T4.3** — 补齐 Responses 事件集并用真实客户端（Codex CLI 等）探测，结果记入 `doc/tasks.md`。
 - **D4.4 / T4.4** — 流式细节：网页重写回复时加 `stream_rewritten_total`；`on_delta` 仅在内容变化时回调；支持 `stream_options.include_usage`；已见回复后读取节点短暂失败时保留上一次文本。
 - **D4.5 / T4.5** — 提示词体量：增量模式只在重播种 / 工具清单变化 / 每 N 轮重发工具说明；调大 `SYSTEM_MAX_CHARS`；`SEED_ENV_NOTE` 默认留空。依赖 D1.1。

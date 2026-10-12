@@ -103,7 +103,10 @@
 - [x] **D4.1** Responses 真流式（来源 4.4）：复用 chat 路径的「队列 + 保活 + 断连 + 错误事件」骨架；`STREAM_KEEPALIVE_S` 在两条路径统一使用（替换写死的 `_KEEPALIVE`）。文件：`server.py`、`api/responses_adapter.py`、`tests/test_responses.py`。
   - **落地**：`_stream_responses` 由伪流式（先 `await svc.run` 再一次性吐事件）改为真流式——后台 `produce()` 把增量投入队列，主循环逐段发 `response.output_text.delta`、空闲超 `STREAM_KEEPALIVE_S` 发 SSE 注释、断连置取消标志、失败发 `sse_error`。`responses_adapter` 新增 `response_created_event` / `response_text_delta_event` / `response_completed_event`，`response_events` 改为复用它。写死的 `_KEEPALIVE = 10.0` 换成 `_keepalive_s()`（读 `config.STREAM_KEEPALIVE_S`，带 0.1s 下限防忙轮询）。回归 `tests/test_responses.py` 新增六条：增量事件存在、无重写时增量拼接 == 最终文本、重写时 completed 为准且不再追加、路由传 `request`、keepalive 读配置、事件构造函数一致。
   - **注意**：重写（网页改写回复）语义与 chat 路径对齐——已发出的增量无法撤回，停止再发，最终文本以 `response.completed` 为准。
-- [ ] **D4.2** `store_thread` 保留 `tool_calls` 与 `tool_call_id`（来源 4.4）：保证 `previous_response_id` 续接工具循环不断链。文件：`api/responses_adapter.py`、`tests/test_responses.py`。
+- [x] **D4.2** `store_thread` 保留 `tool_calls` 与 `tool_call_id`（来源 4.4）：保证 `previous_response_id` 续接工具循环不断链。文件：`api/responses_adapter.py`、`tests/test_responses.py`。
+  - **落地**：新增 `_message_to_payload()`，序列化 `NormalizedMessage` 时带上非空的 `tool_calls` / `tool_call_id`；`store_thread` 增加可选 `tool_calls` 参数——回复含工具调用时记成带 `tool_calls` 的 assistant 消息（`call.model_dump()` 嵌套形态）而非纯文本。`server.py` 两处调用（非流式 + 流式）都传入 `outcome.result.tool_calls`。
+  - **关键坑**：存储必须用 `ToolCall` 的**嵌套**形态（`{id,type,function:{name,arguments}}`），因为回灌走 `ChatMessage(**item)`，其 `tool_calls` 类型是 `List[ToolCall]`；若存内部扁平形态（`{id,name,arguments}`）会在 pydantic 校验处直接 `ValidationError: tool_calls.0.function Field required`。之后 `normalize_messages` → `_tool_calls_to_payload` 会把它转回内部扁平表示。
+  - 回归 `tests/test_responses.py` 新增两条：工具循环续接（两条 assistant 调用 + tool 结果归属都在、名字/参数完整）、无工具调用时仍存纯文本。
 - [ ] **D4.3** 补齐 Responses 事件集并做真实客户端探测（来源 4.4）：补 `output_item.added|done`、`output_text.done` 等；用 Codex CLI 之类真实客户端验证，结果记入 `doc/tasks.md`。
 - [ ] **D4.4** 流式细节（来源 4.10）
   - 网页重写回复时增加 `stream_rewritten_total` 指标，并在最终块或 `bridge_notes` 说明「已截断」。

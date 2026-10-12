@@ -291,12 +291,49 @@ def response_events(
     return events
 
 
-def store_thread(response_id: str, messages: List[NormalizedMessage], reply_text: str) -> None:
-    """把本轮对话写进响应状态，供下次 ``previous_response_id`` 续接。"""
-    payload: List[Any] = []
-    for message in messages:
-        payload.append({"role": message.role, "content": message.content})
-    if reply_text:
+def _message_to_payload(message: NormalizedMessage) -> Dict[str, Any]:
+    """把一条归一化消息序列化成可回灌 ``ChatMessage(**item)`` 的字典。
+
+    ``tool_calls`` / ``tool_call_id`` 必须一起存（T4.2 / D4.2）：此前只存
+    ``role`` + ``content``，导致 ``previous_response_id`` 续接工具循环时
+    assistant 的工具调用意图与 tool 结果的归属都丢了，模型看不到「我刚调了什么、
+    结果对应哪次调用」，工具循环直接断链。
+    """
+    item: Dict[str, Any] = {"role": message.role, "content": message.content}
+    if message.tool_calls:
+        item["tool_calls"] = message.tool_calls
+    if message.tool_call_id:
+        item["tool_call_id"] = message.tool_call_id
+    return item
+
+
+def store_thread(
+    response_id: str,
+    messages: List[NormalizedMessage],
+    reply_text: str,
+    *,
+    tool_calls: Optional[List[ToolCall]] = None,
+) -> None:
+    """把本轮对话写进响应状态，供下次 ``previous_response_id`` 续接。
+
+    ``tool_calls`` 非空时，回复记成带 ``tool_calls`` 的 assistant 消息（而不是纯文本）——
+    否则续接时模型只看到一段可能是空 / 占位的文本，工具循环无从继续。
+    """
+    payload: List[Any] = [_message_to_payload(message) for message in messages]
+    calls = list(tool_calls or [])
+    if calls:
+        # 存 ``ToolCall`` 的**嵌套**形态（{id, type, function:{name,arguments}}）：
+        # 回灌时走 ``ChatMessage(**item)``，它的 ``tool_calls`` 是 ``List[ToolCall]``，
+        # 只认这种结构；扁平形态会在 pydantic 校验处直接失败。之后 ``normalize_messages``
+        # 的 ``_tool_calls_to_payload`` 会把它转回内部扁平表示。
+        payload.append(
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [call.model_dump() for call in calls],
+            }
+        )
+    elif reply_text:
         payload.append({"role": "assistant", "content": reply_text})
     response_state.save(response_id, payload)
 

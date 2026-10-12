@@ -13,7 +13,7 @@ from claude_web.api.responses_adapter import (
     to_task_from_responses,
 )
 from claude_web.errors import InvalidRequestError, UnsupportedInputError
-from claude_web.models import ChatTask
+from claude_web.models import ChatTask, NormalizedMessage
 from tests.fakes import FakePage, make_service
 
 
@@ -215,3 +215,70 @@ def test_response_event_helpers_compose():
     assert _event_types(response_completed_event("resp_1", "m", text="x")) == [
         "response.completed"
     ]
+
+
+# ==================== 工具循环续接（T4.2 / D4.2）====================
+
+
+def test_store_thread_preserves_tool_calls_and_ids():
+    """续接必须保留 assistant 的工具调用意图与 tool 结果的归属。"""
+    from claude_web.models import FunctionCall, ToolCall
+
+    messages = [
+        NormalizedMessage(role="user", content="查一下"),
+        NormalizedMessage(
+            role="assistant",
+            content="",
+            tool_calls=[
+                {
+                    "id": "call_abc",
+                    "type": "function",
+                    "function": {"name": "git_status", "arguments": "{}"},
+                }
+            ],
+        ),
+        NormalizedMessage(role="tool", content="(no output)", tool_call_id="call_abc"),
+    ]
+    store_thread(
+        "resp_tools",
+        messages,
+        "",
+        tool_calls=[
+            ToolCall(id="call_next", function=FunctionCall(name="ls", arguments="{}"))
+        ],
+    )
+    task = to_task_from_responses(
+        {"input": "继续", "previous_response_id": "resp_tools"}, "b"
+    )
+    roles = [m.role for m in task.messages]
+    assert "assistant" in roles and "tool" in roles
+
+    # 两条 assistant 工具调用都要在：历史里的 call_abc 与末尾新加的 call_next。
+    call_ids = [c["id"] for m in task.messages if m.role == "assistant" for c in m.tool_calls]
+    assert "call_abc" in call_ids
+    assert "call_next" in call_ids
+    # 名字 / 参数形态完整（不是只剩 id 的空壳）。内部表示为扁平 {id,name,arguments}。
+    next_call = next(
+        c for m in task.messages if m.role == "assistant" for c in m.tool_calls if c["id"] == "call_next"
+    )
+    assert next_call["name"] == "ls"
+    assert next_call["arguments"] == "{}"
+
+    # 上一轮那条 tool 结果的归属必须还在（否则模型无法把结果对应回调用）。
+    tool_msg = next(m for m in task.messages if m.role == "tool")
+    assert tool_msg.tool_call_id == "call_abc"
+
+
+def test_store_thread_without_tool_calls_keeps_reply_text():
+    """对照：无工具调用时仍按纯文本 assistant 消息存，不引入空 tool_calls。"""
+    store_thread(
+        "resp_plain",
+        [NormalizedMessage(role="user", content="hi")],
+        "答复",
+    )
+    task = to_task_from_responses(
+        {"input": "next", "previous_response_id": "resp_plain"}, "b"
+    )
+    assistant = [m for m in task.messages if m.role == "assistant"]
+    assert any("答复" in (m.content or "") for m in assistant)
+    assert all(not m.tool_calls for m in assistant)

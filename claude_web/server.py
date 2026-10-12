@@ -381,7 +381,12 @@ async def responses(request: Request):
                 headers=build_sse_headers(),
             )
         outcome = await _run_with_disconnect_guard(request, service, task)
-        store_thread(response_id, task.messages, outcome.result.text)
+        store_thread(
+            response_id,
+            task.messages,
+            outcome.result.text,
+            tool_calls=outcome.result.tool_calls,
+        )
         payload = build_response_object(
             task,
             text=outcome.result.text,
@@ -616,7 +621,12 @@ async def _stream_responses(
                     yield response_text_delta_event(response_id, piece)
             elif kind == "result":
                 outcome = payload
-                store_thread(response_id, task.messages, outcome.result.text)
+                store_thread(
+                    response_id,
+                    task.messages,
+                    outcome.result.text,
+                    tool_calls=outcome.result.tool_calls,
+                )
                 final = outcome.result.text
                 # 未发生重写时才补齐增量没覆盖到的尾部；重写场景增量已不可信，
                 # 只把完整最终文本放进 ``response.completed``。
