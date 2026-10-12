@@ -13,22 +13,22 @@
 
 ## 阶段 1：P0 正确性（先做，改动小、影响大）
 
-- [ ] **T1.1** 工具说明判重不被内容抑制（来源 3.1）
+- [x] **T1.1** 工具说明判重不被内容抑制（来源 3.1）
   - 文件：`claude_web/prompting.py`、`tests/test_prompting.py`
   - 做法：`_mentions_tool_instructions` 只在 system 与 user 角色里判重，且标题必须位于行首；tool、assistant 消息不参与。
   - 验收：新增用例，tool 结果里含 `[Tool Calling Instructions]` 时仍然注入说明；system 里已内联时仍不重复注入。
 
-- [ ] **T1.2** 绝对超时优先延长而不是截断（来源 3.2）
+- [x] **T1.2** 绝对超时优先延长而不是截断（来源 3.2）
   - 文件：`claude_web/end_detection.py`、`claude_web/completion/generator.py`、`tests/test_end_detection.py`、`tests/test_generation_latency.py`
   - 做法：`past_deadline` 时若 `generating is True` 且还有延长额度，先 `extend`；延长额度用尽仍在生成，则返回已有正文并在 notes 标明被截断，`finish_reason` 用 `length`。
   - 验收：虚拟时钟用例覆盖「到期时正在生成且已有正文」「延长额度用尽」「到期时已静止」三种情形。
 
-- [ ] **T1.3** 管理操作取桶锁（来源 3.4 的锁部分）
+- [x] **T1.3** 管理操作取桶锁（来源 3.4 的锁部分）
   - 文件：`claude_web/service.py`、`claude_web/bridge_commands.py`、`claude_web/server.py`、`tests/test_bridge_commands.py`、`tests/test_sessions.py`
   - 做法：新增 `service.admin(bucket)`：取桶锁（短超时，失败回 `session_busy`）后再执行 `reset / link / unlink / modal`；HTTP 的 `/session/*` 与聊天命令（chat 与 responses 两条路径）都走它。
   - 验收：桶正在生成时 reset / link 返回 busy，不会关掉页面；空闲时行为不变。
 
-- [ ] **T1.3b** `store.reset()` 不再悄悄清掉 `linked_url`（来源 4.7）
+- [x] **T1.3b** `store.reset()` 不再悄悄清掉 `linked_url`（来源 4.7）
   - 文件：`claude_web/session/store.py`、`claude_web/completion/lifecycle.py`、`claude_web/bridge_commands.py`
   - 做法：reset 保留绑定；要解绑用 unlink。回复文案如实说明。
   - 验收：绑定桶 reset 后 `status` 仍显示绑定。
@@ -41,17 +41,17 @@
 
 ## 阶段 2：并发与资源
 
-- [ ] **T2.1** 驱动启动与页面池创建加锁（来源 4.1）
+- [x] **T2.1** 驱动启动与页面池创建加锁（来源 4.1）
   - 文件：`claude_web/driver.py`、`claude_web/page_pool.py`、`tests/test_browser.py`
   - 做法：`start()` 加 `asyncio.Lock`；`PagePool.acquire` 按桶加锁，驱逐也在锁内；`readiness()` 对忙碌桶返回缓存结果。
   - 验收：并发两个桶同时首次请求只启动一次浏览器；同一桶并发 acquire 只建一个页面，页面数不超过 `MAX_PAGE_POOL`。
 
-- [ ] **T2.2** 接上空闲回收与忙碌标记（来源 4.2）
+- [x] **T2.2** 接上空闲回收与忙碌标记（来源 4.2）
   - 文件：`claude_web/server.py`（lifespan）、`claude_web/service.py`、`claude_web/page_pool.py`
   - 做法：lifespan 起周期回收任务并在关闭时取消；`_run_locked` 前后 `mark_busy(True/False)`（finally 里复位）；满池且全部忙碌时返回 busy，而不是驱逐他人页面。
   - 验收：空闲页面超过 `BUCKET_IDLE_TTL_S` 被关；生成中的页面永不被 LRU 驱逐。
 
-- [ ] **T2.3** 取消语义（来源 4.3）
+- [x] **T2.3** 取消语义（来源 4.3）
   - 文件：`claude_web/errors.py`、`claude_web/completion/generator.py`、`claude_web/service.py`、`tests/test_generation_latency.py`
   - 做法：新增 `GenerationCancelledError`；`_record_failure` 对它单独计数、不写会话 `last_error`；`_fill` 只捕获 `Exception`，让 `CancelledError` 冒泡。
   - 验收：取消不计入超时与失败统计，不污染 `last_error`。
@@ -61,7 +61,7 @@
   - 做法：非流式请求在后台任务里跑，断连时置取消标志（与流式路径同一机制）。
   - 验收：客户端断开后桶锁在一个轮询周期内释放。
 
-- [ ] **T2.5** 提交前处理「页面仍在生成」（来源 4.3）
+- [x] **T2.5** 提交前处理「页面仍在生成」（来源 4.3）
   - 文件：`claude_web/completion/generator.py`、`claude_web/browser/dom_adapter.py`
   - 做法：提交前若 `generating_state` 为真，先等一小段；仍未结束就只点停止控件，再提交。
   - 验收：上一轮取消后立即发下一轮，不再误报「提交未生效」。
@@ -74,7 +74,7 @@
 
 ## 阶段 3：错误语义与配置
 
-- [ ] **T3.1** 内部错误码（来源 4.6）：新增 `InternalError`（500），`_unhandled_handler` 与流式兜底不再包成 `NotReadyError`。文件：`errors.py`、`server.py`。
+- [x] **T3.1** 内部错误码（来源 4.6）：新增 `InternalError`（500），`_unhandled_handler` 与流式兜底不再包成 `NotReadyError`。文件：`errors.py`、`server.py`。
 - [x] **T3.2** 去掉叠加重试（来源 4.6）：`fill_composer` 已重试 `FILL_RETRIES`，`generator._fill` 只对可恢复的写入失败再重试，`ComposerNotFound` 与登录类错误不重试。文件：`generator.py`、`dom_adapter.py`。
 - [x] **T3.3** 额度归因收窄（来源 4.6）：只在「没有新回复」或「弹窗仍在页面上」时报 `UsageLimitError`；已有正文后的停滞仍报停滞。文件：`generator.py`、`tests/test_generation_latency.py`。
 - [ ] **T3.4** 失败类别指标（来源 4.6、第 5 节）：为 `usage_limit_reached`、`prompt_submission_failed`、`reply_not_found`、`context_limit_reached`、取消各加计数。文件：`metrics.py`、`service.py`。

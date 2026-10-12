@@ -14,23 +14,23 @@
 
 ## 阶段 1：P0 正确性（先做，改动小、影响最大）
 
-- [ ] **D1.1** 工具说明判重不被历史正文误抑制（来源 3.1）
+- [x] **D1.1** 工具说明判重不被历史正文误抑制（来源 3.1）
   - 文件：`claude_web/prompting.py`、`claude_web/toolcalls.py`、`tests/test_prompting.py`
   - 长期做法（状态优先，采纳 ChatGPT 版方案）：记录「上一轮已发送的工具清单摘要 + 是否已重播种」，清单未变且网页会话未重播种就不重发；用协议状态而非任意文本推断。
   - 短期兜底（若状态方案未就绪）：`_mentions_tool_instructions` 只在 system / user 角色、且标题位于行首时判重；tool 结果与 assistant 历史不参与。
   - 验收：新增用例——tool 结果 / assistant 历史 / 代码块里含 `[Tool Calling Instructions]` 时**仍然注入**；system 里已内联时**不重复注入**。
 
-- [ ] **D1.2** 绝对超时优先延长，而不是截断（来源 3.2）
+- [x] **D1.2** 绝对超时优先延长，而不是截断（来源 3.2）
   - 文件：`claude_web/end_detection.py`、`claude_web/completion/generator.py`、`tests/test_end_detection.py`、`tests/test_generation_latency.py`
   - 做法：`past_deadline` 时若 `generating is True` 且仍有延长额度，**先 `extend`**（`extend` 分支排在 `has_text → finish` 之前）；真正达到硬上限才结束，用兼容的截断语义（可用时 `finish_reason=length`）并在 notes 标注「被截断」。
   - 验收：虚拟时钟用例覆盖三种情形——① 到期时正在生成且已有正文（应延长，不截断）；② 延长额度耗尽仍在生成（结束且标注截断）；③ 到期前已静止（正常收尾）。
 
-- [ ] **D1.3** 管理操作统一取桶锁（来源 3.3）
+- [x] **D1.3** 管理操作统一取桶锁（来源 3.3）
   - 文件：`claude_web/service.py`、`claude_web/bridge_commands.py`、`claude_web/server.py`、`tests/test_bridge_commands.py`、`tests/test_sessions.py`
   - 做法：新增 `service.admin(bucket)`——先取桶锁（短超时，失败回 `session_busy`），再执行 `reset / link / unlink / modal`；HTTP 的 `/session/*`、聊天命令（chat 与 responses 两条路径）全部走它，消除三条入口各自为政。
   - 验收：桶正在生成时 reset / link 返回 busy、**不会关掉页面 / 打断在途请求**；桶空闲时行为与现在一致。
 
-- [ ] **D1.4** `store.reset()` 不再悄悄清掉 `linked_url`（来源 4.7）
+- [x] **D1.4** `store.reset()` 不再悄悄清掉 `linked_url`（来源 4.7）
   - 文件：`claude_web/session/store.py`、`claude_web/completion/lifecycle.py`、`claude_web/bridge_commands.py`、`tests/test_sessions.py`
   - 做法：reset 只清对话状态，保留绑定；要解绑用 unlink。`/session/reset` 与 `/bridge reset` 的回复文案如实说明保留还是清除绑定。
   - 验收：绑定桶 reset 后 `lifecycle.status(bucket)` 仍显示 `linked_url`。
@@ -44,17 +44,17 @@
 
 ## 阶段 2：并发与资源生命周期
 
-- [ ] **D2.1** 驱动启动与页面池创建加锁（来源 4.1）
+- [x] **D2.1** 驱动启动与页面池创建加锁（来源 4.1）
   - 文件：`claude_web/driver.py`、`claude_web/page_pool.py`、`tests/test_browser.py`
   - 做法：`ClaudeWebDriver.start()` 加共享 `asyncio.Lock`（多个桶首次并发只初始化一次）；`PagePool.acquire` 按桶加锁并把驱逐放进同一临界区；`readiness()` 对忙碌桶返回缓存结果，避免与默认桶生成请求并发操纵同一页面。
   - 验收：并发两桶首次请求只启动一次 Playwright / Chrome；同桶并发 acquire 只建一个页面，页面数不超过 `MAX_PAGE_POOL`。
 
-- [ ] **D2.2** 接上空闲回收与忙碌标记（来源 4.2，**grep 确认当前为零调用**）
+- [x] **D2.2** 接上空闲回收与忙碌标记（来源 4.2，**grep 确认当前为零调用**）
   - 文件：`claude_web/server.py`（lifespan）、`claude_web/service.py`、`claude_web/page_pool.py`、`tests/test_browser.py`
   - 做法：lifespan 起周期 `reap_idle` 任务，关闭时取消并等待；`service._run_locked` 在生成前后 `mark_busy(True/False)`（`finally` 复位，覆盖取消 / 异常 / 成功）；满池且候选全忙时返回 busy，而不是驱逐在用页面；对客户端可控的桶名做新建速率限制。
   - 验收：空闲超过 `BUCKET_IDLE_TTL_S` 的页面被关；**生成中的页面永不被 LRU 驱逐**；第 5 个桶进来不会误关正在生成的页面。
 
-- [ ] **D2.3** 取消语义（来源 4.3）
+- [x] **D2.3** 取消语义（来源 4.3）
   - 文件：`claude_web/errors.py`、`claude_web/completion/generator.py`、`claude_web/service.py`、`tests/test_generation_latency.py`
   - 做法：新增 `GenerationCancelledError`；`_record_failure` 对它单独计数、**不写会话 `last_error`、不计入超时统计**；`generate._fill` 的 `except BaseException` 改为 `except Exception`，让 `CancelledError` 冒泡。
   - 验收：取消不计入超时 / 失败统计，不污染 `last_error`；桶锁在取消后正常释放。
@@ -64,7 +64,7 @@
   - 做法：非流式请求在后台任务里跑，检测到客户端断连就置取消标志（与流式路径同一机制）。
   - 验收：客户端断开后桶锁在一个轮询周期内释放，不再空跑到绝对超时。
 
-- [ ] **D2.5** 提交前处理「页面仍在生成」（来源 4.3）
+- [x] **D2.5** 提交前处理「页面仍在生成」（来源 4.3）
   - 文件：`claude_web/completion/generator.py`、`claude_web/browser/dom_adapter.py`
   - 做法：提交前若 `generating_state` 为真，先等一小段；仍未结束就**只点经确认的停止控件**（沿用 `design.md` 4.3 的安全约束，绝不点其它控件），再重新确认可提交后提交。
   - 验收：上一轮取消 / 失败后立即发下一轮，不再误报「提交未生效」。
@@ -77,9 +77,9 @@
 
 ## 阶段 3：错误语义与配置
 
-- [ ] **D3.1** 内部错误码（来源 4.6）：新增 `InternalError`（500），`_unhandled_handler` 与流式兜底不再把内部 bug 包成 `NotReadyError`。文件：`errors.py`、`server.py`、`tests/`。
+- [x] **D3.1** 内部错误码（来源 4.6）：新增 `InternalError`（500），`_unhandled_handler` 与流式兜底不再把内部 bug 包成 `NotReadyError`。文件：`errors.py`、`server.py`、`tests/`。
 - [x] **D3.2** 去掉叠加重试（来源 4.6）：`fill_composer` 已重试 `FILL_RETRIES`；`generator._fill` 只对**可恢复的写入失败**再重试，`ComposerNotFound` 这类不可恢复错误不重试。文件：`generator.py`、`dom_adapter.py`、`tests/test_generation_latency.py`。
-- [ ] **D3.3** 额度归因收窄（来源 4.6）：只在「没有新回复」或「弹窗仍在页面上」时报 `UsageLimitError`；已有正文后的停滞仍报停滞。文件：`generator.py`、`tests/test_generation_latency.py`。
+- [x] **D3.3** 额度归因收窄（来源 4.6）：只在「没有新回复」或「弹窗仍在页面上」时报 `UsageLimitError`；已有正文后的停滞仍报停滞。文件：`generator.py`、`tests/test_generation_latency.py`。
 - [ ] **D3.4** 失败类别指标（来源 4.6、第 5 节）：为 `usage_limit_reached`、`prompt_submission_failed`、`reply_not_found`、`context_limit_reached`、取消各加计数。文件：`metrics.py`、`service.py`。
 - [ ] **D3.5** 配置路径与列表解析（来源 4.8）
   - `SESSION_FILE` / `USER_DATA_DIR` / `TASK_FILE_DIR` / `OUTPUT_DIR` 相对路径以 `PROJECT_ROOT` 为基准解析（换目录启动不再丢登录态）。
