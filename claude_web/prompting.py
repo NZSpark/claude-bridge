@@ -259,18 +259,40 @@ def normalize_messages(messages: Sequence[ChatMessage]) -> List[NormalizedMessag
     return normalized
 
 
+def _line_starts_with_header(text: str, header: str) -> bool:
+    """文本里是否有一行**以标题开头**（允许行首空白）。
+
+    只看行首、不做任意子串匹配：正文里引用、代码块或文档片段提到这个标题时不该
+    被当成「已经注入过工具说明」。
+    """
+    if not header:
+        return False
+    for line in (text or "").splitlines():
+        if line.lstrip().startswith(header):
+            return True
+    return False
+
+
 def _mentions_tool_instructions(
     messages: Sequence[NormalizedMessage], system_text: str, header: str
 ) -> bool:
     """入站内容里是否已经带了一份工具说明（用于避免重复追加）。
 
-    只在**原始正文**里找约定标题：渲染后的消息会额外加角色标记与 ``[发起工具调用]``
-    载荷，而那两处都不可能产生这个标题，所以扫原始正文与渲染后扫描等价，但不需要
-    把整段历史渲染出来（工具结果单条可达 20k 字符）。
+    **只在 system 与 user 角色里判重，且要求标题位于行首**：
+
+    * tool 结果与 assistant 历史不参与——agent 读取本仓库源码 / 测试 / 文档时，
+      这些内容里会自然出现 ``[Tool Calling Instructions]`` 字面量，一旦参与判重，
+      之后每一轮以及任何重播种都不再注入工具说明（用本项目开发本项目必然触发）。
+    * 要求行首而非任意子串，避免正文里引用 / 代码块里的提法误触发。
+
+    只看**原始正文**（不渲染整段历史），工具结果单条可达 20k 字符。
     """
-    if header and header in system_text:
+    if _line_starts_with_header(system_text, header):
         return True
-    return any(header in (m.content or "") for m in messages if m.role != "system")
+    return any(
+        m.role == "user" and _line_starts_with_header(m.content or "", header)
+        for m in messages
+    )
 
 
 def extract_system_text(messages: Sequence[NormalizedMessage]) -> str:

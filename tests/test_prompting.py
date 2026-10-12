@@ -210,6 +210,70 @@ def test_tools_instruction_not_duplicated_when_already_present():
     assert build.text.count(TOOLCALL_HEADER) == 1
 
 
+def test_tool_result_mentioning_header_does_not_suppress_injection():
+    """回归（P0 3.1）：tool 结果里含标题字面量时**仍要**注入工具说明。
+
+    agent 读取本仓库源码 / 测试 / 文档时会自然产生这段文本；一旦它参与判重，
+    之后每一轮以及任何重播种都不再注入工具说明（用本项目开发本项目必然触发）。
+    """
+    from claude_web.models import NormalizedMessage
+    from claude_web.toolcalls import TOOLCALL_HEADER
+
+    tools = [ToolSpec(name="read_file", description="read", parameters={})]
+    normalized = [
+        NormalizedMessage(role="user", content="读取源码"),
+        NormalizedMessage(
+            role="tool",
+            content=f"{TOOLCALL_HEADER}\nYou are a language model...",
+            tool_call_id="call_1",
+        ),
+    ]
+    build = build_prompt(normalized, tools=tools)
+    assert TOOLCALL_HEADER in build.text
+
+
+def test_assistant_history_mentioning_header_does_not_suppress_injection():
+    """回归（P0 3.1）：assistant 历史里含标题时仍要注入工具说明。"""
+    from claude_web.models import NormalizedMessage
+    from claude_web.toolcalls import TOOLCALL_HEADER
+
+    tools = [ToolSpec(name="read_file", description="read", parameters={})]
+    normalized = [
+        NormalizedMessage(role="user", content="看看 toolcalls.py"),
+        NormalizedMessage(
+            role="assistant",
+            content=f"这里是文件开头：\n{TOOLCALL_HEADER}\n规则如下……",
+        ),
+        NormalizedMessage(role="user", content="继续"),
+    ]
+    build = build_prompt(normalized, tools=tools)
+    assert TOOLCALL_HEADER in build.text
+
+
+def test_header_mid_line_in_user_message_does_not_suppress_injection():
+    """回归：标题**不在行首**（正文引用 / 代码块）时不判重。"""
+    from claude_web.toolcalls import TOOLCALL_HEADER
+
+    tools = [ToolSpec(name="read_file", description="read", parameters={})]
+    normalized = normalize_messages(
+        _msgs(("user", f"请看这段引用：{TOOLCALL_HEADER} 后面还有字"))
+    )
+    build = build_prompt(normalized, tools=tools)
+    assert TOOLCALL_HEADER in build.text
+
+
+def test_system_header_at_line_start_suppresses_injection():
+    """system 里标题位于行首时视为已内联，不重复注入。"""
+    from claude_web.toolcalls import TOOLCALL_HEADER
+
+    tools = [ToolSpec(name="read_file", description="read", parameters={})]
+    normalized = normalize_messages(
+        _msgs(("system", f"{TOOLCALL_HEADER}\n客户端已附完整说明"))
+    )
+    build = build_prompt(normalized, tools=tools)
+    assert build.text.count(TOOLCALL_HEADER) == 1
+
+
 def test_build_prompt_renders_each_message_at_most_once(monkeypatch):
     """回归：为「去重」而重渲染整段历史会把 20k 字符的工具结果也渲染一遍。
 
