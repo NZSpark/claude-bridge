@@ -118,8 +118,23 @@ class SessionStore:
         return state
 
     def reset(self, key: str) -> SessionState:
-        """重置某个桶的对话状态（下一轮重新开对话并完整播种）。"""
-        state = SessionState(has_history=False, turns=0, est_tokens=0, cap_hit=False)
+        """重置某个桶的**对话状态**（下一轮重新开对话并完整播种）。
+
+        刻意**保留**会话绑定（``linked_url``）与 ``pending_reseed``：reset 的语义是
+        「换一条新网页会话重新播种」，不是「解除绑定」。旧实现新建一个空
+        :class:`SessionState`，会顺手把 ``linked_url`` 清掉，于是绑定桶 reset 后
+        **悄悄变成未绑定**——用户以为还钉在那条会话上。要解绑请用 :meth:`update`
+        显式置空（``/session/unlink`` 或 ``/bridge unlink``）。
+        """
+        current = self.state(key)
+        state = SessionState(
+            has_history=False,
+            turns=0,
+            est_tokens=0,
+            cap_hit=False,
+            linked_url=current.linked_url,
+            pending_reseed=current.pending_reseed,
+        )
         self.save_state(key, state)
         return state
 

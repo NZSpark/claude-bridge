@@ -239,7 +239,7 @@ async def reset_session(request: Request) -> Dict[str, Any]:
     _check_reset_token(request)
     body = await _read_json(request)
     bucket = _sanitize_key(body.get("session") or body.get("bucket") or _session_key(request, body))
-    await service.lifecycle.reset(bucket)
+    await service.admin_reset(bucket)
     return {"status": "reset", "session": bucket}
 
 
@@ -250,7 +250,7 @@ async def link_session(request: Request) -> Dict[str, Any]:
     bucket = _sanitize_key(body.get("session") or body.get("bucket") or _session_key(request, body))
     url = str(body.get("url") or "")
     seed = bool(body.get("seed"))
-    normalized = await service.lifecycle.link(bucket, url, seed=seed)
+    normalized = await service.admin_link(bucket, url, seed=seed)
     return {"status": "linked", "session": bucket, "url": redact(normalized), "seed": seed}
 
 
@@ -259,7 +259,7 @@ async def unlink_session(request: Request) -> Dict[str, Any]:
     _check_bridge_auth(request)
     body = await _read_json(request)
     bucket = _sanitize_key(body.get("session") or body.get("bucket") or _session_key(request, body))
-    service.lifecycle.unlink(bucket)
+    service.admin_unlink(bucket)
     return {"status": "unlinked", "session": bucket}
 
 

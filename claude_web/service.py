@@ -7,9 +7,11 @@
 from __future__ import annotations
 
 import logging
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from typing import Callable, Optional
 
+from . import config
 from .completion.generator import DeltaCallback, GenerationResult, ReplyGenerator
 from .completion.lifecycle import Conversation, SessionLifecycle
 from .driver import ClaudeWebDriver
@@ -66,6 +68,41 @@ class ChatService:
         except SessionBusyError:
             self.metrics.inc("session_busy_total")
             raise
+
+    # ---- 管理操作（reset / link / unlink / modal）----
+    #
+    # 为什么统一入口 + 短桶锁（doc/design.md 5.1）：这些操作会关掉页面（reset）、
+    # 导航到别的会话（link）或操纵页面（modal）。不取桶锁就对正在生成的桶执行，
+    # 会直接打断在途请求：页面被 drop / goto，客户端拿到失败或错误内容。
+    # 统一入口也消除了「HTTP 端点 / 聊天命令 / Responses 路径」三条入口各自为政。
+    @asynccontextmanager
+    async def _admin_lock(self, bucket: str):
+        try:
+            async with self.locks.acquire(bucket, timeout_s=config.ADMIN_LOCK_TIMEOUT_S):
+                yield
+        except SessionBusyError:
+            self.metrics.inc("session_busy_total")
+            raise
+
+    async def admin_reset(self, bucket: str) -> None:
+        """取桶锁后重置会话桶（保留会话绑定，见 T1.3）。"""
+        async with self._admin_lock(bucket):
+            await self.lifecycle.reset(bucket)
+
+    async def admin_link(self, bucket: str, url: str, *, seed: bool = False) -> str:
+        """取桶锁后把桶绑定到会话 URL。"""
+        async with self._admin_lock(bucket):
+            return await self.lifecycle.link(bucket, url, seed=seed)
+
+    def admin_unlink(self, bucket: str) -> None:
+        """解除桶的会话绑定。纯内存 / 状态文件操作，不碰页面，无需桶锁。"""
+        self.lifecycle.unlink(bucket)
+
+    async def admin_dismiss_modal(self, bucket: str):
+        """取桶锁后关闭页面上的额度 / 升级弹窗，返回 :class:`ModalState`。"""
+        async with self._admin_lock(bucket):
+            page = await self.driver.page_for(bucket)
+            return await self.driver.dom.dismiss_limit_modal(page)
 
     async def _run_locked(
         self,

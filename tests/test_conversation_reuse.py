@@ -209,3 +209,44 @@ def test_delta_messages_helper():
     ]
     assert [m.role for m in delta_messages(tool_only)] == ["tool"]
     assert delta_messages([]) == []
+
+
+# ==================== 管理操作取桶锁（T1.2）====================
+
+
+def test_admin_reset_returns_busy_when_bucket_generating(tmp_path, monkeypatch):
+    """桶正忙时 reset 快速返回 session_busy，不关掉在途任务的页面（T1.2）。"""
+    from claude_web.errors import SessionBusyError
+    from claude_web.session.lock import BucketLockManager
+
+    monkeypatch.setattr("claude_web.config.ADMIN_LOCK_TIMEOUT_S", 0.05)
+    page = FakePage(snapshots=["答复"])
+    service = make_service(page, tmp_path, locks=BucketLockManager(timeout_s=1))
+
+    async def _scenario() -> None:
+        # 模拟一个在途生成：桶锁被占用。
+        async with service.locks.acquire(BUCKET):
+            try:
+                await service.admin_reset(BUCKET)
+            except SessionBusyError:
+                return
+        raise AssertionError("桶忙时 admin_reset 应该抛 SessionBusyError")
+
+    asyncio.run(_scenario())
+    # 页面没被关掉（reset 未执行）。
+    assert page.closed is False
+
+
+def test_admin_reset_runs_when_bucket_idle(tmp_path):
+    """桶空闲时 admin_reset 正常执行。"""
+    page = FakePage(snapshots=["答复"])
+    service = make_service(page, tmp_path)
+
+    async def _scenario() -> None:
+        # 先把页面放进池子（模拟该桶已有活动），再 reset。
+        await service.driver.page_for(BUCKET)
+        await service.admin_reset(BUCKET)
+
+    asyncio.run(_scenario())
+    # 页面被关闭（下一轮会重建 / 重新播种）。
+    assert page.closed is True

@@ -84,11 +84,18 @@ class BucketLockManager:
                 return
 
     @asynccontextmanager
-    async def acquire(self, key: str) -> AsyncIterator[None]:
-        """获取桶锁；超时抛 :class:`SessionBusyError`。"""
+    async def acquire(
+        self, key: str, *, timeout_s: Optional[float] = None
+    ) -> AsyncIterator[None]:
+        """获取桶锁；超时抛 :class:`SessionBusyError`。
+
+        ``timeout_s`` 可为本次调用覆盖默认超时：管理类操作（reset / link / …）
+        用**短超时**，桶正忙时快速返回 ``session_busy``，而不是把管理命令也排队
+        上百秒。
+        """
         key = key or config.DEFAULT_SESSION_KEY
         bucket = self._bucket(key)
-        timeout = self.timeout_s
+        timeout = self.timeout_s if timeout_s is None else timeout_s
         try:
             if timeout and timeout > 0:
                 await asyncio.wait_for(bucket.lock.acquire(), timeout=timeout)

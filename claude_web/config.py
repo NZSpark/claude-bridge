@@ -215,6 +215,9 @@ SESSION_SCOPING_BY_UA = env_bool("SESSION_SCOPING_BY_UA", True)
 SESSION_KEY_MAX_LEN = env_int("SESSION_KEY_MAX_LEN", 64)
 MAX_SESSION_BUCKETS = env_int("MAX_SESSION_BUCKETS", 4)
 BUCKET_LOCK_TIMEOUT_S = env_float("BUCKET_LOCK_TIMEOUT_S", 120.0)
+#: 管理类操作（reset / link / unlink / modal）取桶锁的**短超时**：桶正忙时快速
+#: 返回 ``session_busy``，而不是让管理命令也排队上百秒、更不会强行关掉在途任务的页面。
+ADMIN_LOCK_TIMEOUT_S = env_float("ADMIN_LOCK_TIMEOUT_S", 10.0)
 BUCKET_IDLE_TTL_S = env_float("BUCKET_IDLE_TTL_S", 900.0)
 #: 内存里缓存的会话状态上限（超出按最久未用逐出）；状态本就落盘，逐出内存副本安全。
 MAX_SESSION_STATE_CACHE = env_int("MAX_SESSION_STATE_CACHE", 64)

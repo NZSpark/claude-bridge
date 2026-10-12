@@ -182,14 +182,20 @@ def test_unlink_reports_and_clears_binding(tmp_path):
     assert service.lifecycle.status(BUCKET)["linked_url"] is None
 
 
-def test_reset_drops_binding_and_reports_scope(tmp_path):
+def test_reset_keeps_binding_and_reports_scope(tmp_path):
+    """reset 只换网页会话重新播种，**保留**会话绑定（T1.3）。
+
+    旧行为会顺手清掉 ``linked_url``，让绑定桶 reset 后悄悄变成未绑定。
+    """
     import asyncio
 
     service = _service(FakePage(), tmp_path)
     asyncio.run(handle_command([{"role": "user", "content": f"/bridge link {VALID_ID}"}], service, BUCKET))
+    assert service.lifecycle.status(BUCKET)["linked_url"] == VALID_URL
     reply = asyncio.run(handle_command([{"role": "user", "content": "/bridge reset"}], service, BUCKET))
     assert reply is not None and "只影响这个桶" in reply
-    assert service.lifecycle.status(BUCKET)["linked_url"] is None
+    # 绑定保留；reset 只是换网页会话、下一轮重新播种。
+    assert service.lifecycle.status(BUCKET)["linked_url"] == VALID_URL
 
 
 def test_reseed_explains_reuse_and_points_at_reset(tmp_path):

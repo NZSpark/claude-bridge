@@ -102,7 +102,10 @@ def test_store_roundtrip_and_reset(tmp_path):
     assert reloaded.linked_url == "https://claude.ai/chat/abc"
 
     store.reset("b1")
-    assert SessionStore(tmp_path / "state.json").state("b1").turns == 0
+    reset_state = SessionStore(tmp_path / "state.json").state("b1")
+    assert reset_state.turns == 0
+    # 回归（T1.3）：reset 只清对话状态，**保留**会话绑定。
+    assert reset_state.linked_url == "https://claude.ai/chat/abc"
 
 
 def test_store_ignores_corrupted_file(tmp_path, caplog):

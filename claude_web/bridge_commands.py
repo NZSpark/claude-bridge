@@ -329,20 +329,22 @@ async def _session_reply(command: BridgeCommand, service: Any, bucket: str) -> s
             ]
         )
     if sub == "reset":
-        await service.lifecycle.reset(bucket)
+        await service.admin_reset(bucket)
         logger.info("[命令] bucket=%s 已按 %s session reset 重置。", bucket, BRIDGE_COMMAND)
-        return "\n".join(
-            [
-                f"[Bridge] 已重置会话桶 {bucket}：下一轮会开一条**新的网页会话**，",
-                "并把客户端传来的完整历史播种进去（上下文不丢）。",
-                " 影响范围：只影响这个桶；其它桶不动。",
-                " 注意：这不是删除客户端的对话历史，也不清除 Claude 账户里的远程会话记录。",
-                " HTTP 等价入口：POST /session/reset",
-            ]
-        )
+        had_link = bool(service.lifecycle.status(bucket).get("linked_url"))
+        lines = [
+            f"[Bridge] 已重置会话桶 {bucket}：下一轮会开一条**新的网页会话**，",
+            "并把客户端传来的完整历史播种进去（上下文不丢）。",
+            " 影响范围：只影响这个桶；其它桶不动。",
+            " 注意：这不是删除客户端的对话历史，也不清除 Claude 账户里的远程会话记录。",
+        ]
+        if had_link:
+            lines.append(" 会话绑定**保留**（reset 只换网页会话，不解绑）；要解绑用 unlink。")
+        lines.append(" HTTP 等价入口：POST /session/reset")
+        return "\n".join(lines)
     if sub == "unlink":
         had = bool(service.lifecycle.status(bucket).get("linked_url"))
-        service.lifecycle.unlink(bucket)
+        service.admin_unlink(bucket)
         logger.info("[命令] bucket=%s 已按 %s session unlink。", bucket, BRIDGE_COMMAND)
         if not had:
             return f"[Bridge] 会话桶 {bucket} 本来就没有绑定网页会话。"
@@ -370,7 +372,7 @@ async def _link_reply(command: BridgeCommand, service: Any, bucket: str) -> str:
             ]
         )
     try:
-        normalized = await service.lifecycle.link(bucket, url, seed=command.seed)
+        normalized = await service.admin_link(bucket, url, seed=command.seed)
     except (InvalidRequestError, NotReadyError) as exc:
         return "\n".join(
             [
@@ -433,15 +435,14 @@ async def _modal_reply(service: Any, bucket: str) -> str:
     就关掉」的手动入口，也顺便回答「页面上到底有没有这个弹窗」。
     """
     try:
-        page = await service.driver.page_for(bucket)
-        state = await service.driver.dom.dismiss_limit_modal(page)
+        state = await service.admin_dismiss_modal(bucket)
     except Exception as exc:  # noqa: BLE001
         logger.warning("[命令] bucket=%s %s modal 失败：%s", bucket, BRIDGE_COMMAND, type(exc).__name__)
         return "\n".join(
             [
                 f"[Bridge] 命令未执行：拿不到会话桶 {bucket} 的页面（{type(exc).__name__}）。",
-                " 可能原因：浏览器未启动 / 页面已失效。只读命令（status / models）不受影响；",
-                " 下一个生成请求会惰性启动浏览器并重试。",
+                " 可能原因：浏览器未启动 / 页面已失效 / 该桶正忙（在生成中）。",
+                " 只读命令（status / models）不受影响；下一个生成请求会惰性启动浏览器并重试。",
             ]
         )
     if state.found and state.dismissed:
