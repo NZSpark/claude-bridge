@@ -49,17 +49,17 @@
 
 ## 阶段 2：浏览器并发与任务生命周期
 
-- [ ] **T2.1** 让浏览器驱动启动真正幂等（来源 4.1）
+- [x] **T2.1** 让浏览器驱动启动真正幂等（来源 4.1）
   - 文件：`claude_web/driver.py`、`tests/test_browser.py`。
   - 做法：共享 `asyncio.Lock` 保护初始化全过程，正确处理启动中异常、取消和重复调用。
   - 验收：不同桶并发首次访问时 Playwright / 浏览器只初始化一次；启动失败后行为可恢复；已有浏览器不被重复启动。
 
-- [ ] **T2.2** 为页面获取、创建和淘汰提供并发保护（来源 4.1）
+- [x] **T2.2** 为页面获取、创建和淘汰提供并发保护（来源 4.1）
   - 文件：`claude_web/page_pool.py`、`tests/test_browser.py`。
   - 做法：按桶合并并发创建，保护容量检查与淘汰操作；页面池满且所有候选页面均忙碌时返回明确 busy，不得超过容量或关闭忙碌页面。readiness 不应与生成请求争抢同一页面。
   - 验收：同桶并发 acquire 只创建一个页面；并发创建不突破 `MAX_PAGE_POOL`；满池时忙碌页面保持可用；readiness 繁忙行为可预测。
 
-- [ ] **T2.3** 接通 busy 标记及周期空闲回收（来源 4.1）
+- [x] **T2.3** 接通 busy 标记及周期空闲回收（来源 4.1）
   - 文件：`claude_web/server.py`（lifespan）、`claude_web/service.py`、`claude_web/page_pool.py`。
   - 做法：在生成任务实际持有页面期间设置 busy，并在 `finally` 释放；应用 lifespan 启动周期 `reap_idle` 任务，关闭时取消并等待其结束。
   - 验收：成功、异常、超时、取消路径都会复位 busy；空闲页面超过 `BUCKET_IDLE_TTL_S` 后回收；生成中的页面绝不会被 LRU / TTL 淘汰。
