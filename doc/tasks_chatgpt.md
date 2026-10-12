@@ -31,7 +31,7 @@
   - 做法：reset 清除对话状态但保留 `linked_url`；unlink 才负责解绑。同步更新 HTTP 和聊天命令回复，避免文案暗示绑定仍在或已经解除但实际状态相反。
   - 验收：绑定桶 reset 后 `status` 仍显示绑定；unlink 后绑定被清除；相关行为与管理锁测试相容。
 
-- [ ] **T1.4a** 增加客户端历史一致性指纹与诊断（来源 update 3.3）
+- [x] **T1.4a** 增加客户端历史一致性指纹与诊断（来源 update 3.3）
   - 文件：`claude_web/completion/lifecycle.py`、`claude_web/session/schema.py`、`claude_web/service.py`、`tests/test_conversation_reuse.py`。
   - 做法：成功同步后记录稳定的历史指纹，例如首条 user 摘要、消息序列/条数、末条 assistant 摘要、system 提示摘要和工具清单摘要。下一轮检测有效前缀或摘要不一致时，先记录低敏日志与 notes，不立即改变复用行为。不得记录完整正文作为诊断信息。
   - 验收：指纹生成和比较具有确定性；覆盖相同提示词、回滚、重新生成、换任务、历史压缩、system 提示变化及旧状态缺字段的兼容行为。
