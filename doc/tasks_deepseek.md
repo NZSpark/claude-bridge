@@ -89,7 +89,7 @@
 - [ ] **D3.6** 启动校验与摘要日志（来源 4.8）
   - 旧键（`STABLE_POLLS` / `QUIET_POLLS` / `STALL_POLLS`）告警；校验 `BUCKET_LOCK_TIMEOUT_S >= CLAUDE_TIMEOUT`、`SETTLE_NO_SIGNAL_S >= SETTLE_S`、`STALL_S > SUBMIT_LOST_S`；把生效值写进摘要日志（不含密钥）。
   - 文件：`config.py`、`server.py`、`tests/test_config.py`。
-- [ ] **D3.7** 会话比较与绑定（来源 4.7）
+- [x] **D3.7** 会话比较与绑定（来源 4.7）
   - `_same_conversation` 与 `lifecycle.link` 落点校验改为解析 URL、**精确比较 `/chat/<ID>`**（现在用 `startswith(target[:len-1])`，会话 ID 只差最后一位会误判同一条）。
   - 绑定桶触顶后的处理：换新会话或明确报错，不再反复 `goto` 同一个已满会话。
   - 可选：保存未绑定桶新建会话的 URL，页面回收 / 重启后恢复。

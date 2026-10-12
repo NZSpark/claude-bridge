@@ -150,7 +150,7 @@
 
 ## 阶段 4：会话持久化、配置、日志与资源可观测性
 
-- [ ] **T4.1** 使用结构化 URL 比较会话绑定（来源 5.1）
+- [x] **T4.1** 使用结构化 URL 比较会话绑定（来源 5.1）
   - 文件：`claude_web/completion/lifecycle.py`、`claude_web/session/store.py`、`tests/test_conversation_reuse.py`。
   - 做法：解析 URL 并校验协议、主机、路径及完整 `/chat/<ID>`，统一实现 `_same_conversation` 和 link 落点校验；处理绑定会话达到上下文上限的情形，不能反复导航到同一个已满会话。
   - 验收：相似前缀但不同 ID 的 URL 不会被判成同一会话；非法主机、路径及边界 URL 均有测试；触顶结果明确。

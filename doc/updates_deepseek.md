@@ -42,6 +42,7 @@
 | D3.3 / T3.3 | 额度归因收窄：仅在「现在仍有弹窗」或「本轮无正文」时报额度 | `generator.py` 失败归因段 | `f8758a7` |
 | D3.2 / T3.2 | 去掉叠加重试：`_fill` 只对可恢复写入失败重试，不可恢复错误（输入区缺失 / 登录失效 / 提交已耗尽）快速冒泡 | `generator.py` `_UNRECOVERABLE_FILL_ERRORS` | 本次 |
 | D2.4 / T2.4 | 非流式 / Responses 路径的断连检测：后台跑 `svc.run` + 轮询 `is_disconnected`，断开即取消、快速释放桶锁 | `server.py` `_run_with_disconnect_guard` | 本次 |
+| D3.7 / T3.7 | 会话 URL 精确比较：解析 URL 按主机 + 路径精确比对，修掉「ID 只差末位被误判同一条」 | `lifecycle.py` `_conversation_key` | 本次 |
 
 > **D3.3 落地细节（本次）**：条件收窄为 `if quota_now or (limit_modal_seen and not has_text_now):`。回归测试 `test_quota_modal_seen_at_submit_does_not_mask_a_real_stall` 构造「先自述在生成、随后停止信号且正文不再增长」的停滞；因默认 `STALL_S(30) > SETTLE_S(2.5)`，有正文的停滞分支不可达，测试显式把 `STALL_S` 降到 `1.0` 让停滞先于落定触发，断言抛 `GenerationStalledError` 且错误码 ≠ `usage_limit_reached`。
 
@@ -57,7 +58,7 @@
 - **D3.4 / T3.4** — 失败类别指标：为 `usage_limit_reached` / `prompt_submission_failed` / `reply_not_found` / `context_limit_reached` / 取消各加计数（`metrics.py` 目前只有 `request_cancelled_total`）。
 - **D3.5 / T3.5** — 配置路径与列表解析：`SESSION_FILE` / `USER_DATA_DIR` / `TASK_FILE_DIR` / `OUTPUT_DIR` 相对路径以 `PROJECT_ROOT` 解析；选择器配置**只按 `||` 切分**（避免 `:is(a,b)` 被切坏）；`LINK_ALLOWED_HOSTS=*` 启动强告警。
 - **D3.6 / T3.6** — 启动校验与摘要日志：旧键（`STABLE_POLLS` / `QUIET_POLLS` / `STALL_POLLS`）告警；校验 `BUCKET_LOCK_TIMEOUT_S >= CLAUDE_TIMEOUT`、`SETTLE_NO_SIGNAL_S >= SETTLE_S`、`STALL_S > SUBMIT_LOST_S`；生效值写摘要日志（不含密钥）。
-- **D3.7 / T3.7** — 会话比较与绑定：`_same_conversation` 与 `lifecycle.link` 改为解析 URL、精确比较 `/chat/<ID>`（当前 `startswith(target[:len-1])` 在 ID 只差末位时会误判同一条）；绑定桶触顶后换新会话或明确报错，不再反复 `goto` 已满会话。
+- ~~**D3.7 / T3.7** — 会话比较与绑定。~~ **已完成（URL 精确比较部分）**：新增 `_conversation_key(url)`，`_same_conversation` 与 `lifecycle.link` 落点校验都改为解析 URL、按主机 + 规范化路径**精确**比对（忽略查询串 / 片段 / 末尾斜杠，其余逐字相同）。修掉了 `startswith(target[:len(target)-1])` 把「会话 ID 只差末位」误判成同一条的 bug。**未做**：绑定桶触顶后换新会话 / 明确报错（仍待办）。
 
 ### P2（API、提示词、日志、工程化）
 - **D4.1 / T4.1** — Responses 真流式：复用 chat 路径的「队列 + 保活 + 断连 + 错误事件」骨架（见 §4 的 `_KEEPALIVE`）。

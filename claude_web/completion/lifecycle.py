@@ -99,11 +99,32 @@ def history_fingerprint(messages: Sequence[NormalizedMessage]) -> str:
     return hasher.hexdigest()[:24]
 
 
+def _conversation_key(url: str) -> Optional[tuple]:
+    """把会话 URL 解析成可精确比较的键 ``(host, path)``；无法解析时返回 ``None``。
+
+    旧实现用 ``startswith(target[:len-1])`` 做前缀比对，会把「会话 ID 只差最后一位」
+    的两条会话误判成同一条（例如 ``…5d9c8d`` 与 ``…5d9c8e``），于是复用到了错误的
+    会话上下文。这里改为解析 URL、按主机 + 规范化路径**精确**比较（T3.7 / D3.7）：
+    忽略查询串与片段、忽略末尾斜杠，其它一律要求逐字相同。
+    """
+    raw = (url or "").strip()
+    if not raw:
+        return None
+    parsed = urlparse(raw)
+    host = (parsed.hostname or "").lower()
+    path = (parsed.path or "").rstrip("/") or "/"
+    if not host:
+        return None
+    return host, path
+
+
 def _same_conversation(current_url: str, target_url: str) -> bool:
-    """当前页面是否已经在目标会话上（保守比对：前缀一致即视为同一条）。"""
-    if not current_url:
+    """当前页面是否已经在目标会话上（解析 URL、精确比较主机 + 会话路径）。"""
+    current = _conversation_key(current_url)
+    target = _conversation_key(target_url)
+    if current is None or target is None:
         return False
-    return current_url.startswith(target_url[: max(10, len(target_url) - 1)])
+    return current == target
 
 
 class SessionLifecycle:
@@ -312,7 +333,9 @@ class SessionLifecycle:
                 "导航到绑定 URL 失败", detail={"error": type(exc).__name__}
             ) from exc
         actual = str(getattr(page, "url", "") or "")
-        if actual and not actual.startswith(normalized[: max(10, len(normalized) - 1)]):
+        # 落点校验同样改为精确比较（T3.7 / D3.7）：只容忍站点自身的查询串 / 末尾斜杠
+        # 差异，绝不接受「另一个会话 ID」。
+        if actual and not _same_conversation(actual, normalized):
             raise NotReadyError("导航落点与绑定 URL 不一致", detail={"mismatch": True})
         await self.driver.dom.ensure_usable(page)
         self.store.update(bucket, linked_url=normalized, pending_reseed=bool(seed))

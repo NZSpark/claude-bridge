@@ -315,3 +315,54 @@ def test_cancel_is_not_recorded_as_failure(tmp_path):
     assert snap["request_cancelled_total"] == 1
     assert snap["request_error_total"] == 0
     assert snap["request_timeout_total"] == 0
+
+
+# ==================== 会话 URL 精确比较（T3.7 / D3.7）====================
+
+
+def test_same_conversation_requires_exact_id():
+    """会话 ID 只差最后一位必须判**不同**（旧前缀比对会误判成同一条）。"""
+    from claude_web.completion.lifecycle import _same_conversation
+
+    a = "https://claude.ai/chat/b646548c-d27c-4dc7-9205-3134ac5d9c8d"
+    b = "https://claude.ai/chat/b646548c-d27c-4dc7-9205-3134ac5d9c8e"
+    assert _same_conversation(a, b) is False
+    assert _same_conversation(a, a) is True
+
+
+def test_same_conversation_tolerates_query_and_trailing_slash():
+    """站点自身的查询串 / 末尾斜杠差异不算换会话，其余一律逐字比较。"""
+    from claude_web.completion.lifecycle import _same_conversation
+
+    base = "https://claude.ai/chat/abc123"
+    assert _same_conversation(base + "?foo=bar", base) is True
+    assert _same_conversation(base + "/", base) is True
+    assert _same_conversation(base + "#frag", base) is True
+    # 主机不同 / 路径不同 → 不同会话。
+    assert _same_conversation("https://evil.example.com/chat/abc123", base) is False
+    assert _same_conversation("https://claude.ai/chat/abc124", base) is False
+    # 空 / 无法解析 → 保守判否。
+    assert _same_conversation("", base) is False
+    assert _same_conversation(base, "") is False
+
+
+def test_link_rejects_navigation_landing_on_other_conversation(tmp_path):
+    """落点校验：页面停在「ID 只差最后一位」的别的会话上 → 报落点不一致（T3.7）。
+
+    旧实现的前缀比对会放行这种落点，于是桶绑定到了错误的会话。
+    """
+    from claude_web.errors import NotReadyError
+
+    target = "https://claude.ai/chat/b646548c-d27c-4dc7-9205-3134ac5d9c8d"
+    wrong = "https://claude.ai/chat/b646548c-d27c-4dc7-9205-3134ac5d9c8e"
+
+    class _RedirectingPage(FakePage):
+        async def goto(self, url: str, **kwargs):
+            # 站点把我们导到了**另一条**会话：绑定必须失败，而不是默默接受。
+            self.goto_calls.append(url)
+            self.url = wrong
+
+    page = _RedirectingPage()
+    service = make_service(page, tmp_path)
+    with pytest.raises(NotReadyError):
+        asyncio.run(service.lifecycle.link(BUCKET, target))
