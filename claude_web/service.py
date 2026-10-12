@@ -64,7 +64,13 @@ class ChatService:
         self.metrics.inc("request_total")
         try:
             async with self.locks.acquire(task.bucket):
-                return await self._run_locked(task, on_delta=on_delta, cancel=cancel)
+                # 生成期间把该桶标记为忙碌：空闲回收（TTL）与满池 LRU 驱逐都跳过它，
+                # 避免「第 5 个桶进来时把正在生成的页面关掉」（T2.3）。
+                self.driver.mark_busy(task.bucket, True)
+                try:
+                    return await self._run_locked(task, on_delta=on_delta, cancel=cancel)
+                finally:
+                    self.driver.mark_busy(task.bucket, False)
         except SessionBusyError:
             self.metrics.inc("session_busy_total")
             raise

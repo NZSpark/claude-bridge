@@ -135,9 +135,15 @@ async def lifespan(app: FastAPI):
         logger.warning("[启动] 未设置 BRIDGE_TOKEN：仅适合本机使用，请勿暴露到公网。")
     if not config.ENABLE_RESPONSES_API:
         logger.info("[启动] Responses API 未启用（ENABLE_RESPONSES_API=false）。")
+    reaper = asyncio.create_task(_reap_idle_loop())
     try:
         yield
     finally:
+        reaper.cancel()
+        try:
+            await reaper
+        except (asyncio.CancelledError, Exception):  # noqa: BLE001
+            pass
         try:
             await service.driver.close()
         except Exception:  # noqa: BLE001
@@ -145,6 +151,28 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="ClaudeBridge", version="0.1.0", lifespan=lifespan)
+
+
+async def _reap_idle_loop() -> None:
+    """周期性关闭空闲超时的页面（T2.3）。
+
+    页面池的 ``reap_idle`` / ``mark_busy`` 此前没有任何调用点：``BUCKET_IDLE_TTL_S``
+    形同虚设，而 ``MAX_PAGE_POOL`` 的 LRU 会驱逐**正在生成**的页面。这里把回收接上；
+    忙碌标记在 :meth:`ChatService.run` 里设置，因此回收 / 驱逐都会跳过在用页面。
+    """
+    interval = config.REAP_INTERVAL_S
+    if interval <= 0:
+        return
+    while True:
+        await asyncio.sleep(interval)
+        try:
+            reaped = await service.driver.reap_idle()
+            if reaped:
+                logger.info("[页面池] 空闲回收：关闭 %s 个页面（%s）", len(reaped), ", ".join(reaped))
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("[页面池] 空闲回收失败：%s", type(exc).__name__)
 
 
 @app.exception_handler(BridgeError)

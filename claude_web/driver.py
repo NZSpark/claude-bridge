@@ -385,6 +385,10 @@ class ClaudeWebDriver:
     async def reap_idle(self) -> list:
         return await self.pool.reap_idle()
 
+    def mark_busy(self, bucket: str, busy: bool) -> None:
+        """标记某桶页面「正在被使用」：空闲回收与 LRU 驱逐都跳过它。"""
+        self.pool.mark_busy(bucket, busy)
+
 
 #: 进程级默认 driver（server 使用；测试可替换注入）。
 driver = ClaudeWebDriver()

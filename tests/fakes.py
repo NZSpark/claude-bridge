@@ -383,6 +383,12 @@ class FakeDriver:
 
         return await self.pool.acquire(bucket, _create)
 
+    def mark_busy(self, bucket: str, busy: bool) -> None:
+        self.pool.mark_busy(bucket, busy)
+
+    async def reap_idle(self):
+        return await self.pool.reap_idle()
+
     async def open_new_conversation(self, page: FakePage) -> None:
         page.new_chat_opened = True
 

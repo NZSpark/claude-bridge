@@ -219,6 +219,8 @@ BUCKET_LOCK_TIMEOUT_S = env_float("BUCKET_LOCK_TIMEOUT_S", 120.0)
 #: 返回 ``session_busy``，而不是让管理命令也排队上百秒、更不会强行关掉在途任务的页面。
 ADMIN_LOCK_TIMEOUT_S = env_float("ADMIN_LOCK_TIMEOUT_S", 10.0)
 BUCKET_IDLE_TTL_S = env_float("BUCKET_IDLE_TTL_S", 900.0)
+#: 后台空闲回收任务的间隔（秒）；0 = 不启动周期回收（只按需回收）。
+REAP_INTERVAL_S = env_float("REAP_INTERVAL_S", 60.0)
 #: 内存里缓存的会话状态上限（超出按最久未用逐出）；状态本就落盘，逐出内存副本安全。
 MAX_SESSION_STATE_CACHE = env_int("MAX_SESSION_STATE_CACHE", 64)
 NEW_SESSION_ON_START = env_bool("CLAUDE_NEW_SESSION")
