@@ -7,9 +7,15 @@
 回复的同时回收 / 复用旧行（条数停在基线上），``count <= baseline`` 就永远成立，于是
 一路轮询到停滞。
 
-这里覆盖三件事：
+同一次事故的第二轮（2026-10-12 14:17）暴露了更强的形态：长会话里页面会
+**虚拟化 / 回收**旧行，提交后 assistant / 提问条数**比基线还少**（日志现场：
+``assistant 6/基线 8，提问 5/基线 8``），而页面确实已经回答。条数口径与「条数没变多就
+当作还是基线那一条」的旧口径会同时失灵——因此结构信号改比**提问指纹**（与条数无关）。
+
+这里覆盖四件事：
 
 * 条数停在基线上，但页面上已经出现本轮提问的回答 → **必须认出**（靠结构信号）；
+* 条数不升反降（虚拟化回收旧行），但本轮提问已落到页面上 → **必须认出**；
 * 条数没涨、页面上也没有新提问（还是上一条回复）→ **不能**把旧正文当成新回复；
 * 结构信号读不到时（旧页面 / 替身）→ 行为退回只看条数，与改造前一致。
 """
@@ -72,16 +78,56 @@ def test_flat_reply_count_does_not_return_the_previous_reply(tmp_path):
     assert read.text == ""
 
 
-def test_dropped_user_count_is_not_treated_as_a_new_turn(tmp_path):
-    """用户消息条数变少（页面回收旧行）不算本轮提问：宁可不认，也不能返回旧正文。"""
+def test_missing_user_node_after_prune_is_not_a_new_turn(tmp_path):
+    """页面上读不到任何提问节点（旧行被回收干净）→ 指纹无从比较，退回保守：不认。"""
     page = FakePage(snapshots=["答复一"], user_messages=["很旧的一轮"])
     page.flat_reply_rows = 1
     extractor = ReplyExtractor(ClaudeDOMAdapter())
     baseline = asyncio.run(extractor.baseline(page))
 
     page.submitted = True
-    page.user_messages = []  # 旧行被回收：条数反而变少
+    page.user_messages = []  # 旧行被回收：页面上连最后一条提问都没有
     read = asyncio.run(extractor.read_new(page, baseline))
+    assert read.is_new is False
+
+
+def test_pruned_rows_still_detect_reply_by_user_fingerprint():
+    """页面虚拟化掉旧行、条数**比基线更少**时，靠最后一条提问的指纹仍要认出本轮。
+
+    现场（2026-10-12 14:17 日志）：基线 8 条回复 / 8 条提问，提交后页面上只剩
+    6 条回复 / 5 条提问（旧行被回收），而页面确实已经回答。此时条数口径与旧口径
+    「条数没变多就当作还是基线那一条」双双失灵，必须先比提问指纹。
+    """
+    users = [f"第{i}轮" for i in range(1, 9)]
+    page = FakePage(
+        snapshots=["答复一"], user_messages=users, flat_reply_rows=8, prune_on_submit=4
+    )
+    extractor = ReplyExtractor(ClaudeDOMAdapter())
+    baseline = asyncio.run(extractor.baseline(page))
+    assert (baseline.count, baseline.user_count) == (8, 8)
+    assert baseline.user_tail == "第8轮"
+
+    page.submitted = True
+    page.filled_texts.append("本轮提示词")  # 本轮提问落到页面上（旧行同时被回收）
+    read = asyncio.run(extractor.read_new(page, baseline))
+    assert read.user_count < baseline.user_count  # 条数比基线更少
+    assert read.is_new is True
+    assert read.structural is True
+    assert read.text == "答复一"
+
+
+def test_pruned_rows_without_new_prompt_do_not_return_the_old_reply():
+    """只回收了旧行、本轮提问还没落到页面上：最后一条提问仍是基线那一条，不能认。"""
+    users = [f"第{i}轮" for i in range(1, 9)]
+    page = FakePage(
+        snapshots=["答复一"], user_messages=users, flat_reply_rows=8, prune_on_submit=4
+    )
+    extractor = ReplyExtractor(ClaudeDOMAdapter())
+    baseline = asyncio.run(extractor.baseline(page))
+
+    page.submitted = True  # 提交了，但页面还没把本轮提示词渲染出来
+    read = asyncio.run(extractor.read_new(page, baseline))
+    assert read.user_count < baseline.user_count
     assert read.is_new is False
 
 

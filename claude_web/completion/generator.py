@@ -229,7 +229,8 @@ class ReplyGenerator:
         def _log_end(reason: str, *, chars: int = 0) -> None:
             """记一条不含正文的收尾日志：以后「客户端一直等到超时」能直接从日志看出来。"""
             logger.info(
-                "[生成] %s：轮询 %s 次，正文 %s 字符，曾经生成中=%s，assistant %s/基线 %s，提问 %s/基线 %s",
+                "[生成] %s：轮询 %s 次，正文 %s 字符，曾经生成中=%s，assistant %s/基线 %s，"
+                "提问 %s/基线 %s，回复在提问之后=%s",
                 reason,
                 polls,
                 chars,
@@ -238,6 +239,7 @@ class ReplyGenerator:
                 baseline.count,
                 last_read.user_count if last_read is not None else "-",
                 baseline.user_count,
+                last_read.trailing if last_read is not None else "-",
             )
 
         while True:

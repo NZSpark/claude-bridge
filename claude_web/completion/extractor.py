@@ -6,8 +6,10 @@
 
 ⚠️ 判定不能只看 assistant 条数：真实页面上新增本轮回复时可能同时回收 / 复用旧行
 （条数停在基线上），只看条数会漏判，把一次**页面上明明已经回答**的请求报成
-``reply_not_found``（事故 2026-10-12）。因此 :meth:`ReplyExtractor.read_new` 用条数与
-「本轮提问是否已落到页面上且其后已有 assistant 节点」两把独立的钥匙（见 4.4）。
+``reply_not_found``（事故 2026-10-12）。长会话里页面还会**虚拟化 / 回收**旧行，提交后
+条数甚至**比基线更少**（同一次事故的第二轮：基线 8 条 → 6 条回复 / 5 条提问）。因此
+:meth:`ReplyExtractor.read_new` 用条数与「本轮提问是否已落到页面上（按文本指纹，与条数
+无关）且其后已有 assistant 节点」两把独立的钥匙（见 4.4）。
 
 除了「新旧回复」这层，还有「节点里哪些文本属于正文」这层：assistant 节点同时包含
 无障碍标题、动作栏、时间戳与推广行。DOM 侧（``COMPLETE_TEXT_JS`` + 可配置的
@@ -166,8 +168,9 @@ class ReplyExtractor:
         判定用**两把独立的钥匙**（任一成立即算新回复）：
 
         1. **条数**：assistant 节点比基线多（改造前的唯一口径）；
-        2. **结构**：页面上最后一条提问已经不是基线那一条，且其后已经出现 assistant
-           节点——这条与条数无关，所以页面回收 / 复用旧行（条数停在基线上）时依然能认出回复。
+        2. **结构**：页面上最后一条提问已经不是基线那一条（按**文本指纹**比较，与条数无关），
+           且其后已经出现 assistant 节点——所以页面回收 / 复用旧行时依然能认出回复，
+           **包括条数不升反降**（页面虚拟化掉旧行，2026-10-12 第二轮事故）的场面。
 
         两把都不成立才算「还没有新回复」。指纹读不到时（旧页面 / 替身页面）退回只看条数，
         与改造前的行为一致。
@@ -216,22 +219,22 @@ class ReplyExtractor:
     ) -> bool:
         """页面上最后一条提问是否已经不是基线那一条（= 本轮提问已落到页面上）。
 
-        保守口径：
+        首选**身份**口径：比最后一条提问的文本指纹。它与条数无关，因此页面对旧行做
+        **回收 / 虚拟化**时同样成立——这类页面提交后条数会**比基线更少**（事故
+        2026-10-12 第二轮：基线 8 条，提交后页面上只剩 6 条回复 / 5 条提问，而页面确实
+        已经给出回复）。旧口径「条数没变多就当作还是基线那一条」会把整轮判死，报出
+        ``reply_not_found``。
 
-        * ``user`` 条数**变多** → 是本轮；
-        * 条数**一样**时比最后一条提问的文本指纹（页面回收旧行时条数不变，但指纹会变）；
-        * 条数变少 / 指纹读不到 → 当作「还是基线那一条」，留待下一轮或退到条数口径
-          （宁可不认，也不能把上一条回复当成新回复返回）。
+        指纹读不到时（旧页面 / 替身页面）退回条数口径：``user`` 条数变多 → 是本轮；
+        否则当作「还是基线那一条」，宁可不认，也不能把上一条回复当成新回复返回。
         """
         if state.user_count > baseline.user_count:
             return True
-        if state.user_count != baseline.user_count:
-            return False
         probed = await self.dom.reply_state(page, want_tail=True)
         tail = probed.last_user_tail
-        if not tail or not baseline.user_tail:
-            return False
-        return tail != baseline.user_tail
+        if tail and baseline.user_tail:
+            return tail != baseline.user_tail
+        return probed.user_count > baseline.user_count
 
     async def read_latest(self, page: Any) -> ReplyRead:
         """读取最后一条回复（不区分新旧，用于恢复场景核对页面现状）。"""

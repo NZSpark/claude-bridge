@@ -94,6 +94,7 @@ class FakePage:
         title_text: str = "Claude",
         user_messages: Optional[List[str]] = None,
         flat_reply_rows: Optional[int] = None,
+        prune_on_submit: int = 0,
         limit_modal: Optional[str] = None,
         modal_closable: bool = True,
         modal_click_works: bool = True,
@@ -132,6 +133,10 @@ class FakePage:
         #: assistant 节点条数**恒定**为该值（复现 2026-10-12 的 ``reply_not_found``：
         #: 页面上明明已经有回复，条数却始终等于基线）。
         self.flat_reply_rows = flat_reply_rows
+        #: 提交后页面**虚拟化 / 回收**掉的最旧行数：真实的 Claude 页面只保留最近的
+        #: 渲染窗口，长会话提交后节点条数会比基线**更少**（复现 2026-10-12 第二轮：
+        #: 基线 8 条 → 6 条回复 / 5 条提问，而页面确实已经给出回复）。
+        self.prune_on_submit = max(0, int(prune_on_submit))
         #: 页面上的「额度用尽 / 升级」弹窗文案（``None`` = 没有弹窗）。
         self.limit_modal = limit_modal
         #: 弹窗里是否有可点的关闭控件 / 点击是否真的关得掉 / Escape 能不能关掉。
@@ -279,7 +284,10 @@ class FakePage:
         rows = self._current_snapshots()
         if self.flat_reply_rows is None:
             return rows
-        pad = max(0, self.flat_reply_rows - len(rows))
+        total = self.flat_reply_rows
+        if self.submitted:
+            total = max(0, total - self.prune_on_submit)
+        pad = max(0, total - len(rows))
         return ["(旧回复)"] * pad + rows
 
     def _user_rows(self) -> List[str]:
@@ -287,6 +295,8 @@ class FakePage:
         rows = list(self.user_messages)
         if self.submitted and self.filled_texts:
             rows.append(self.filled_texts[-1])
+        if self.submitted and self.prune_on_submit:
+            rows = rows[self.prune_on_submit :]
         return rows
 
     @staticmethod
