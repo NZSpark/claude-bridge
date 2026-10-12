@@ -95,7 +95,7 @@
 - [x] **T4.1** Responses 真流式（来源 4.4）（与 D4.1 同一处落地，见 `doc/updates_deepseek.md`）：复用 chat 路径的队列 + 保活 + 断连 + 错误事件；`STREAM_KEEPALIVE_S` 在两条路径统一使用。文件：`server.py`、`api/responses_adapter.py`、`tests/test_responses.py`。
 - [x] **T4.2** `store_thread` 保留 `tool_calls` 与 `tool_call_id`（来源 4.4）：保证 `previous_response_id` 续接工具循环不断链。（与 D4.2 同一处落地，见 `doc/updates_deepseek.md`）
 - [ ] **T4.3** 补齐 Responses 事件集并做真实客户端探测（来源 4.4）：`output_item.added|done`、`output_text.done` 等；用 Codex CLI 之类真实客户端验证，结果记入 `doc/tasks.md`。
-- [ ] **T4.4** 流式细节（来源 4.10）
+- [x] **T4.4** 流式细节（来源 4.10）（与 D4.4 同一处落地，见 `doc/updates_deepseek.md`）
   - 网页重写回复时增加 `stream_rewritten_total`，并在最终块或 `bridge_notes` 说明。
   - `on_delta` 只在内容变化时回调。
   - 支持 `stream_options.include_usage`。
@@ -107,7 +107,7 @@
   - `SEED_ENV_NOTE` 默认留空。
   - 文件：`prompting.py`、`config.py`、`.env.example`。
   - 依赖：T1.1。
-- [ ] **T4.6** `tool_choice` 生效（来源 4.5）：至少 `none` 时不注入工具说明；`required` 与指定函数在提示里点名。文件：`prompting.py`、`chat_adapter.py`。
+- [x] **T4.6** `tool_choice` 生效（来源 4.5）：至少 `none` 时不注入工具说明；`required` 与指定函数在提示里点名。文件：`prompting.py`、`chat_adapter.py`。（与 D4.6 同一处落地，见 `doc/updates_deepseek.md`）
 
 ## 阶段 5：日志、解析与落盘
 
