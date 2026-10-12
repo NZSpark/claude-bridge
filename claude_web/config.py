@@ -72,15 +72,34 @@ def env_bool(key: str, default: bool = False) -> bool:
 
 
 def env_list(key: str, default: str) -> List[str]:
-    """把 ``a||b||c``（或逗号分隔）的候选列表解析为字符串列表。"""
+    """把 ``a||b||c`` 的候选列表解析为字符串列表。
+
+    只用 ``||`` 作分隔符（T3.5 / D3.5）：早先还按逗号切分，会把合法的 CSS 选择器
+    切坏——例如 ``:is(a,b)`` 会变成 ``:is(a`` 与 ``b)`` 两个无效选择器，于是
+    ``query_selector_all`` 静默命中不到任何节点。逗号在选择器 / 文案里都是合法字符，
+    绝不能当分隔符。
+    """
     raw = os.environ.get(key, default)
     parts: List[str] = []
-    for chunk in raw.replace("||", "\n").split("\n"):
-        for piece in chunk.split(","):
-            piece = piece.strip()
-            if piece:
-                parts.append(piece)
+    for piece in raw.split("||"):
+        piece = piece.strip()
+        if piece:
+            parts.append(piece)
     return parts
+
+
+def env_path(key: str, default: str) -> Path:
+    """解析路径配置：相对路径一律以 ``PROJECT_ROOT`` 为基准（T3.5 / D3.5）。
+
+    早先直接用 ``os.environ`` 的原始字符串（如 ``./user_data``），于是路径随**当前工作
+    目录**漂移：换个目录启动就找不到登录态 / 状态文件，表现为「莫名要求重新登录」。
+    以项目根为基准后，从任何 cwd 启动都指向同一份数据；``~`` 仍会展开；绝对路径原样保留。
+    """
+    raw = (os.environ.get(key, default) or "").strip()
+    path = Path(raw).expanduser()
+    if not path.is_absolute():
+        path = PROJECT_ROOT / path
+    return path.resolve()
 
 
 # ==================== 1. 服务监听 ====================
@@ -111,6 +130,12 @@ CLAUDE_WEBSITE = env_str("CLAUDE_WEBSITE", "https://claude.ai/new")
 HOME_URL = CLAUDE_WEBSITE
 #: /session/link 允许绑定的主机（子域自动允许；"*" = 不限制）。
 LINK_ALLOWED_HOSTS = env_list("LINK_ALLOWED_HOSTS", "claude.ai")
+#: 允许列表为 "*" 时启动要打强告警（等于对任意 HTTPS 主机开放绑定）。
+if "*" in LINK_ALLOWED_HOSTS:
+    logger.warning(
+        "[配置] LINK_ALLOWED_HOSTS 含 '*'：/session/link 可绑定任意 HTTPS 主机，"
+        "这会削弱绑定 URL 的防导航滥用保护，仅应在完全可信的环境使用。"
+    )
 
 #: 缺省初始会话链接：设置后，**默认会话桶**在未单独绑定时直接进入这条会话，
 #: 而不是让桥自己新建一条（桥自建时会复用同一条）。
@@ -123,10 +148,11 @@ DEFAULT_LINK_URL = env_str("CLAUDE_DEFAULT_LINK_URL", "").strip()
 
 
 # ==================== 3. 路径 ====================
-USER_DATA_DIR = env_str("USER_DATA_DIR", "./user_data")
-OUTPUT_DIR = env_str("OUTPUT_DIR", "./output")
-SESSION_FILE = Path(env_str("SESSION_FILE", "./user_data/.claude_state"))
-TASK_FILE_DIR = Path(env_str("TASK_FILE_DIR", "./user_data/.claude_tasks"))
+# 相对路径一律以 PROJECT_ROOT 为基准解析（T3.5 / D3.5）：换 cwd 启动不再丢登录态。
+USER_DATA_DIR = env_path("USER_DATA_DIR", "./user_data")
+OUTPUT_DIR = env_path("OUTPUT_DIR", "./output")
+SESSION_FILE = env_path("SESSION_FILE", "./user_data/.claude_state")
+TASK_FILE_DIR = env_path("TASK_FILE_DIR", "./user_data/.claude_tasks")
 
 
 # ==================== 4. 运行模式 / 调试 ====================

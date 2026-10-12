@@ -81,11 +81,12 @@
 - [x] **D3.2** 去掉叠加重试（来源 4.6）：`fill_composer` 已重试 `FILL_RETRIES`；`generator._fill` 只对**可恢复的写入失败**再重试，`ComposerNotFound` 这类不可恢复错误不重试。文件：`generator.py`、`dom_adapter.py`、`tests/test_generation_latency.py`。
 - [x] **D3.3** 额度归因收窄（来源 4.6）：只在「没有新回复」或「弹窗仍在页面上」时报 `UsageLimitError`；已有正文后的停滞仍报停滞。文件：`generator.py`、`tests/test_generation_latency.py`。
 - [ ] **D3.4** 失败类别指标（来源 4.6、第 5 节）：为 `usage_limit_reached`、`prompt_submission_failed`、`reply_not_found`、`context_limit_reached`、取消各加计数。文件：`metrics.py`、`service.py`。
-- [ ] **D3.5** 配置路径与列表解析（来源 4.8）
+- [x] **D3.5** 配置路径与列表解析（来源 4.8）
   - `SESSION_FILE` / `USER_DATA_DIR` / `TASK_FILE_DIR` / `OUTPUT_DIR` 相对路径以 `PROJECT_ROOT` 为基准解析（换目录启动不再丢登录态）。
   - 选择器类配置**只按 `||` 切分**，不按逗号（避免 `:is(a,b)` 被切坏）。
   - `LINK_ALLOWED_HOSTS=*` 时启动强告警。
   - 文件：`config.py`、`.env.example`、`tests/test_config.py`、`tests/test_config_drift.py`。
+  - **落地**：新增 `env_path()`（相对路径以 `PROJECT_ROOT` 解析，绝对路径原样）；`env_list()` 只按 `||` 切分、逐项 strip、过滤空串，不再按逗号切；`LINK_ALLOWED_HOSTS` 含 `*` 时启动 `warnings.warn` 强告警。`test_config_drift.py` 的 `_ENV_CALL` 正则扩到 `env_path`，保证四处路径键被计入契约检查。
 - [ ] **D3.6** 启动校验与摘要日志（来源 4.8）
   - 旧键（`STABLE_POLLS` / `QUIET_POLLS` / `STALL_POLLS`）告警；校验 `BUCKET_LOCK_TIMEOUT_S >= CLAUDE_TIMEOUT`、`SETTLE_NO_SIGNAL_S >= SETTLE_S`、`STALL_S > SUBMIT_LOST_S`；把生效值写进摘要日志（不含密钥）。
   - 文件：`config.py`、`server.py`、`tests/test_config.py`。

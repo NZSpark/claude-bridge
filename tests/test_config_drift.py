@@ -15,7 +15,7 @@ PROJECT_ROOT = Path(config.__file__).resolve().parent.parent
 ENV_EXAMPLE = PROJECT_ROOT / ".env.example"
 CONFIG_PY = PROJECT_ROOT / "claude_web" / "config.py"
 
-_ENV_CALL = re.compile(r"env_(?:str|int|float|bool|list)\(\s*[\"']([A-Z0-9_]+)[\"']")
+_ENV_CALL = re.compile(r"env_(?:str|int|float|bool|list|path)\(\s*[\"']([A-Z0-9_]+)[\"']")
 
 
 def _keys_in_env_example() -> set:
