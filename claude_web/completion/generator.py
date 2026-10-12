@@ -403,11 +403,15 @@ class ReplyGenerator:
         result = GenerationResult(
             text=raw,
             raw_text=raw,
-            finish_reason="stop",
+            # 硬超时截断（页面仍在生成、延长额度已耗尽）：用兼容的截断语义，
+            # 让客户端能区分「完整回复」与「被截断的部分内容」。
+            finish_reason="length" if verdict.truncated else "stop",
             polls=polls,
             saw_generating=state.saw_generating,
             rewritten=rewritten,
         )
+        if verdict.truncated:
+            result.notes.append("回复被硬超时截断：页面仍在生成，延长额度已耗尽")
 
         if tool_list:
             parsed = parse_tool_calls(raw, allowed_names=[spec.name for spec in tool_list])

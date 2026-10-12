@@ -80,6 +80,9 @@ class EndVerdict:
     #: ``fail_stalled`` 时：确定是「提交没生效」（页面静止、输入区里还留着提示词），
     #: 而不是「提交成功但回复没渲染出来」。调用方据此给出准确的错误类别。
     submit_lost: bool = False
+    #: ``finish`` 时：回复是被**硬超时截断**的（页面仍在生成、延长额度已耗尽），
+    #: 调用方应据此改用截断语义（``finish_reason=length``）并在 notes 里说明。
+    truncated: bool = False
 
     @property
     def finished(self) -> bool:
@@ -156,11 +159,20 @@ def evaluate_poll(
         )
 
     if past_deadline:
-        if has_text:
-            return EndVerdict("finish", state_after, note="超时但已读到内容，直接返回，不重发")
-        if extend_budget > 0 and generating:
+        # 优先级（doc/design.md 4.4，T1.6）：页面仍在生成且还有延长额度时**先延长**，
+        # 而不是因为「已有正文」就把仍在继续生成的回复当完整回复返回（那会截断长回复）。
+        if generating and extend_budget > 0:
             wait = min(extend_budget, max(1.0, limits.extend_step_s))
             return EndVerdict("extend", state_after, extend_seconds=wait)
+        if has_text:
+            # 到硬上限：页面可能仍在生成，已有正文只能作为**截断**结果返回（绝不重发）。
+            truncated = generating is True
+            note = (
+                "超时（页面仍在生成，延长额度已耗尽），返回已读到的部分内容，标记为截断"
+                if truncated
+                else "超时但已读到内容，直接返回，不重发"
+            )
+            return EndVerdict("finish", state_after, note=note, truncated=truncated)
         return EndVerdict("fail_timeout", state_after)
 
     return EndVerdict("continue", state_after)

@@ -183,3 +183,37 @@ def test_settle_does_not_fire_while_page_still_generating(
     assert result.text == "思考中…"
     # 前 4 轮都在生成中（每轮 0.4s），落定后才开始计入静默时长。
     assert clock.total == pytest.approx(4 * 0.4 + config.SETTLE_S, abs=0.9)
+
+
+def test_hard_timeout_truncates_when_page_still_generating(
+    clock: VirtualClock, monkeypatch, default_timing
+):
+    """回归（P0 3.2 / T1.6）：页面一直生成、延长额度耗尽时，用截断语义收尾。
+
+    旧实现只要「已有正文」就在 deadline 那一刻当完整回复返回（``finish_reason=stop``），
+    把仍在继续生成的长回复截断却不告诉客户端。
+    """
+    monkeypatch.setattr(config, "MAX_UPSTREAM_RETRIES", 0)
+    monkeypatch.setattr(config, "RESPONSE_TIMEOUT_S", 0.05)
+    monkeypatch.setattr(config, "RESPONSE_TIMEOUT_EXTEND_S", 0.0)
+    page = FakePage(
+        snapshots=["开头一部分"],
+        generating_plan=[True],  # 永远在生成
+    )
+    result = asyncio.run(ReplyGenerator().generate(page, "hi"))
+    assert result.text == "开头一部分"
+    assert result.finish_reason == "length"
+    assert any("截断" in note for note in result.notes)
+
+
+def test_hard_timeout_stops_cleanly_when_page_already_settled(
+    clock: VirtualClock, monkeypatch, default_timing
+):
+    """对照：到 deadline 时页面已经停止生成，则是完整回复，不能标成截断。"""
+    monkeypatch.setattr(config, "MAX_UPSTREAM_RETRIES", 0)
+    monkeypatch.setattr(config, "RESPONSE_TIMEOUT_S", 0.05)
+    monkeypatch.setattr(config, "RESPONSE_TIMEOUT_EXTEND_S", 0.0)
+    page = FakePage(snapshots=["完整回复"], generating_plan=[False])
+    result = asyncio.run(ReplyGenerator().generate(page, "hi"))
+    assert result.finish_reason == "stop"
+    assert not any("截断" in note for note in result.notes)

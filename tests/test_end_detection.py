@@ -151,6 +151,30 @@ def test_timeout_with_partial_text_finishes():
     )
     assert v.action == "finish"
     assert "超时" in v.note
+    # 延长额度耗尽但页面仍在生成：必须标记为截断（T1.6）。
+    assert v.truncated is True
+
+
+def test_timeout_with_text_but_not_generating_is_not_truncated():
+    """页面已经停止、只是恰好在 deadline 那一刻收尾：不是截断。"""
+    state = EndState(saw_generating=True)
+    v = evaluate_poll(
+        state, limits=LIMITS, reply_seen=True, generating=False, has_text=True,
+        past_deadline=True, extend_budget=0.0,
+    )
+    assert v.action == "finish"
+    assert v.truncated is False
+
+
+def test_timeout_prefers_extend_over_finishing_with_partial_text():
+    """回归（P0 3.2 / T1.6）：页面仍在生成且有延长额度时，**先延长**而不是截断已有正文。"""
+    state = EndState(saw_generating=True)
+    v = evaluate_poll(
+        state, limits=LIMITS, reply_seen=True, generating=True, has_text=True,
+        past_deadline=True, extend_budget=30.0,
+    )
+    assert v.action == "extend"
+    assert v.extend_seconds == 10.0
 
 
 def test_timeout_extends_while_generating_with_budget():
