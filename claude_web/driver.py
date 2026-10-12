@@ -363,7 +363,17 @@ class ClaudeWebDriver:
             report.detail = {"error": type(exc).__name__}
             return report
         report.page = True
-        status = await self.dom.page_status(page)
+        # 就绪探测受 READY_TIMEOUT_MS 约束（T6.2 / D6.2）：此前该配置声明了却从未
+        # 被读；页面卡在加载中时 readiness 会一直挂着，调用方只能干等。
+        try:
+            status = await asyncio.wait_for(
+                self.dom.page_status(page), timeout=config.READY_TIMEOUT_MS / 1000.0
+            )
+        except (asyncio.TimeoutError, TimeoutError):
+            report.error = "页面就绪探测超时"
+            report.error_code = ErrorCode.BROWSER_UNAVAILABLE.value
+            report.detail = {"timeout_ms": config.READY_TIMEOUT_MS}
+            return report
         report.authenticated = status.authenticated and not status.challenged
         report.composer = status.composer
         report.url = status.url

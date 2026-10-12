@@ -189,7 +189,8 @@ BROWSER_SANDBOX = env_bool("BROWSER_SANDBOX", True)
 # 系统可能弹一次钥匙串授权，属预期。仅在你确实要复用已有 profile 时开启。
 BROWSER_USE_OS_KEYCHAIN = env_bool("BROWSER_USE_OS_KEYCHAIN")
 DEBUG = env_bool("CLAUDE_DEBUG")
-SAVE_DEBUG_ARTIFACTS = env_bool("SAVE_DEBUG_ARTIFACTS")
+# 注：``SAVE_DEBUG_ARTIFACTS`` 已删除（T6.2 / D6.2）——它声明了却从未有落盘实现，
+# 属「看起来有保护」的空壳；真要做调试工件落盘时应连同脱敏一起重新设计。
 ENABLE_DEBUG_DOM = env_bool("ENABLE_DEBUG_DOM")
 
 
@@ -251,7 +252,8 @@ BUCKET_IDLE_TTL_S = env_float("BUCKET_IDLE_TTL_S", 900.0)
 REAP_INTERVAL_S = env_float("REAP_INTERVAL_S", 60.0)
 #: 内存里缓存的会话状态上限（超出按最久未用逐出）；状态本就落盘，逐出内存副本安全。
 MAX_SESSION_STATE_CACHE = env_int("MAX_SESSION_STATE_CACHE", 64)
-NEW_SESSION_ON_START = env_bool("CLAUDE_NEW_SESSION")
+# 注：``NEW_SESSION_ON_START`` 已删除（T6.2 / D6.2）——无消费点，且不在 .env.example
+# 的契约里；保留它只会让「配置三处一致」的漂移检查名不副实。
 TOOL_RESULT_MAX_CHARS = env_int("TOOL_RESULT_MAX_CHARS", 20000)
 #: 播种 prompt 里的「环境说明」：告诉模型本机就是工作目录，不必向用户索要地址 /
 #: 让用户手动执行（参考 chatgpt-bridge 的 SEED_ENV_NOTE）。

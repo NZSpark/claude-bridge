@@ -99,12 +99,18 @@ class TaskStore:
 
     @staticmethod
     def new(bucket: str, goal: str = "", messages: Optional[List[dict]] = None) -> TaskSnapshot:
+        # 只保留最近 TASK_KEEP_MESSAGES 条（T6.2 / D6.2）：此前该配置声明了却从未被读，
+        # 快照会把整段历史都落盘。0 = 不限制。
+        kept = list(messages or [])
+        limit = config.TASK_KEEP_MESSAGES
+        if limit and len(kept) > limit:
+            kept = kept[-limit:]
         return TaskSnapshot(
             bucket=bucket,
             started_at=time.time(),
             state="queued",
             goal=goal,
-            messages=messages or [],
+            messages=kept,
         )
 
 

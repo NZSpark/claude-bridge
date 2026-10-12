@@ -81,8 +81,8 @@
 | `STREAM_KEEPALIVE_S` | `config.py:253` | **未接线**：`server.py:404` 写死 `_KEEPALIVE = 10.0`，`server.py:453` 用它。D4.1 处理。 |
 | `READY_TIMEOUT_MS` | `config.py` | **未接线**：无任何调用点。 |
 | `FILL_TIMEOUT_MS` | `config.py` | **未接线**。 |
-| `NEW_SESSION_ON_START` | `config.py` | **未接线**。 |
-| `SAVE_DEBUG_ARTIFACTS` | `config.py` | **未接线**。 |
+| `NEW_SESSION_ON_START` | ~~`config.py`~~ | **已删除（D6.2）**：无消费点且不在 .env.example 契约里。 |
+| `SAVE_DEBUG_ARTIFACTS` | ~~`config.py`~~ | **已删除（D6.2）**：声明了却无落盘实现，属空壳。 |
 | `reap_idle` / `mark_busy` | `driver.py` / `page_pool.py` / `server.py` / `service.py` | **已接线**（D2.2 本轮修复），评审旧结论**已失效**。 |
 | `TaskStore.load` | `tasks.py:55`，被 `api/responses_adapter.py:147` 调用 | **纠正 DeepSeek 评审**：它**不是**死代码，`responses_adapter` 在用。 |
 

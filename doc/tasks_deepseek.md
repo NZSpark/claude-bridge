@@ -150,7 +150,12 @@
 > 每项二选一：**接上，或删除并同步 `design.md`**。不要保留「看起来有保护」的空壳。
 
 - [ ] **D6.1** 指标：`request_retry_total`、`browser_unavailable_total`、`browser_selector_miss_total`、`reply_extraction_failure_total`、`session_recovery_total`、`tool_parse_failure_total`、`request_latency`、`reply_extraction_latency`。
-- [ ] **D6.2** 配置与字段：`STREAM_KEEPALIVE_S`（见 D4.1）、`TASK_KEEP_MESSAGES`、`READY_TIMEOUT_MS`、`FILL_TIMEOUT_MS`、`NEW_SESSION_ON_START`、`SAVE_DEBUG_ARTIFACTS`、`SessionState.cap_failures`、`TaskSnapshot.messages / recoveries`、状态 `queued / generating / recovering`。
+- [x] **D6.2** 配置与字段：`STREAM_KEEPALIVE_S`（见 D4.1）、`TASK_KEEP_MESSAGES`、`READY_TIMEOUT_MS`、`FILL_TIMEOUT_MS`、`NEW_SESSION_ON_START`、`SAVE_DEBUG_ARTIFACTS`、`SessionState.cap_failures`、`TaskSnapshot.messages / recoveries`、状态 `queued / generating / recovering`。
+  - **接线（3 项）**：`FILL_TIMEOUT_MS` 包住 `fill_composer` 重试循环（超时抛 `PromptSubmissionError`）；`READY_TIMEOUT_MS` 包住 `readiness` 的 `page_status` 探测（超时回 `browser_unavailable`）；`TASK_KEEP_MESSAGES` 在 `TaskStore.new` 截断快照消息（0 = 不限制）。
+  - **删除（2 项）**：`NEW_SESSION_ON_START`（无消费点 + 不在 .env.example）、`SAVE_DEBUG_ARTIFACTS`（声明了却无落盘实现）。同步删掉 `.env.example` 的键与 `design.md` 的表格行。
+  - **已接线无需改**：`SessionState.cap_failures`（lifecycle 读写）、`TaskSnapshot.recoveries`（tasks 序列化）。
+  - 回归 `tests/test_config_wiring.py` 六条：删除的键彻底不在 config / .env.example、`TASK_KEEP_MESSAGES` 截断与 0 不限、`FILL_TIMEOUT_MS` / `READY_TIMEOUT_MS` 出现在对应源码中。
+  - **踩坑**：删 `NEW_SESSION_ON_START` 时漏删 `.env.example` 的 `CLAUDE_NEW_SESSION` 行，被 `test_config_drift.py` 当场逮住——正是这套契约检查的价值。
 - [ ] **D6.3** 函数：`models.model_is_supported`、`session/lock.WARNED_BAD_STATE`、`errors.page_usable_reason` / `page_responds`（应接进 `ensure_usable` 与 readiness 判活）、`errors.is_page_lost_error` / `is_timeout_error`。
 - [ ] **D6.4** 其它：`prompting.py` 里 `_OMISSION_NOTE` 的重复注释；`/bridge modal` 的「改状态」标注（实际不改会话状态）；确认 `session_store.py`（纯委托门面）、`main.py` 与 `claude_api_server.py`（重复入口）是否都要保留；先 grep 确认 `TaskStore.load / clear` 有无生产调用方。
 

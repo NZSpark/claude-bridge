@@ -509,6 +509,20 @@ class ClaudeDOMAdapter(DiagnosticsMixin):
         内容真的发给站点。
         """
         attempts = max(1, config.FILL_RETRIES)
+        # 整个填充循环受 FILL_TIMEOUT_MS 约束（T6.2 / D6.2）：此前该配置声明了却
+        # 从未被读，填充卡住时只能等更上层的超时，错误归因也更模糊。
+        try:
+            return await asyncio.wait_for(
+                self._fill_with_retries(page, text, attempts), timeout=config.FILL_TIMEOUT_MS / 1000.0
+            )
+        except (asyncio.TimeoutError, TimeoutError) as exc:
+            raise PromptSubmissionError(
+                "写入输入区超时",
+                detail={"attempts": attempts, "timeout_ms": config.FILL_TIMEOUT_MS},
+            ) from exc
+
+    async def _fill_with_retries(self, page: Any, text: str, attempts: int) -> None:
+        """``fill_composer`` 的重试主体（独立出来便于整体加超时）。"""
         last_error: Optional[BaseException] = None
         for attempt in range(attempts):
             element = await self.find_composer(page)

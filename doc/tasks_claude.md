@@ -132,7 +132,7 @@
 每项二选一：接上，或删除并同步 `design.md`。不要保留空壳。
 
 - [ ] **T6.1** 指标：`request_retry_total`、`browser_unavailable_total`、`browser_selector_miss_total`、`reply_extraction_failure_total`、`session_recovery_total`、`tool_parse_failure_total`、`request_latency`、`reply_extraction_latency`。
-- [ ] **T6.2** 配置与字段：`STREAM_KEEPALIVE_S`（见 T4.1）、`TASK_KEEP_MESSAGES`、`SessionState.cap_failures`、`TaskSnapshot.messages / recoveries`、状态 `queued / generating / recovering`。
+- [x] **T6.2** 配置与字段：`STREAM_KEEPALIVE_S`（见 T4.1）、`TASK_KEEP_MESSAGES`、`SessionState.cap_failures`、`TaskSnapshot.messages / recoveries`、状态 `queued / generating / recovering`。（与 D6.2 同一处落地，见 `doc/updates_deepseek.md`）
 - [ ] **T6.3** 函数：`model_is_supported`、`lock.WARNED_BAD_STATE`、`page_usable_reason` / `page_responds`（应接进 `ensure_usable` 与 readiness 判活）、`is_page_lost_error`、`is_timeout_error`。
 - [ ] **T6.4** 其它：`_OMISSION_NOTE` 的重复注释；`/bridge modal` 的「改状态」标注；确认 `session_store.py`、`main.py` 与 `claude_api_server.py` 是否都要保留；先 grep 确认 `TaskStore.load / clear` 有无生产调用方。
 
