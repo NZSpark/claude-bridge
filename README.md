@@ -222,11 +222,13 @@ CLAUDE_E2E=1 .venv/bin/python -m pytest tests/e2e -q   # 真实浏览器 E2E（�
 - **回复被截断 / 结果为空**：用 `GET /diagnostics` 看 `selector_version` 与选择器命中数，
   多数是站点改版导致回复节点选择器落空。
 - **报 `reply_not_found`（「提交后未识别到本轮回复」）但网页上明明有回复**：日志里
-  `[生成]` 的收尾行现在会带上现场（`assistant 条数/基线`、`提问 条数/基线`），错误详情里也有
-  `reply_count` / `reply_baseline` / `user_count` / `user_baseline` / `trailing_reply`。
+  `[生成]` 的收尾行会带上现场（`assistant 条数/基线`、`提问 条数/基线`、`回复在提问之后`），
+  错误详情里也有 `reply_count` / `reply_baseline` / `user_count` / `user_baseline` / `trailing_reply`。
   两把钥匙任一成立就认回复：**assistant 条数变多**，或**本轮提问已经落到页面上且其后
-  已有 assistant 节点**。历史上唯一一次真实误报是页面在渲染本轮回复时回收 / 复用了旧行
-  （条数停在基线上），现在由第二把钥匙捕获，日志里会多一行「靠结构信号认出来的」。
+  已有 assistant 节点**（提问按文本指纹比较，与条数无关）。已知的两种真实误报：
+  ① 页面在渲染本轮回复时回收 / 复用了旧行（条数停在基线上）；
+  ② 长会话里页面只保留渲染窗口，提交后条数**比基线更少**（如 `assistant 6/基线 8，
+  提问 5/基线 8`）。两种都由第二把钥匙捕获，日志里会多一行「靠结构信号认出来的」。
   若 `trailing_reply=false`（页面上压根没有排在本轮提问之后的回复节点），那确实是网页
   端没有渲染出回复：看 `GET /diagnostics` 的选择器命中数与 `selector_version`。
 - **正文里混进页面文字**（同一段正文出现两遍、结尾多出 `just now` / `13 minutes ago`、
