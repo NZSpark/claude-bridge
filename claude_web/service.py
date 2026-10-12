@@ -31,6 +31,19 @@ from .tasks import TaskStore, default_task_store
 logger = logging.getLogger(__name__)
 
 
+#: 错误码 -> 失败类别计数器（T3.4 / D3.4）。
+#:
+#: 只覆盖「按码分类」的少数几类；笼统的 ``request_error_total`` / ``request_timeout_total``
+#: 仍在上面的流程里各自累加。取消单独走 ``request_cancelled_total``，不进本表，
+#: 因为它在 :meth:`ChatService._record_failure` 的更早分支就已重新抛出。
+_FAILURE_COUNTERS = {
+    "usage_limit_reached": "usage_limit_reached_total",
+    "prompt_submission_failed": "prompt_submission_failed_total",
+    "reply_not_found": "reply_not_found_total",
+    "context_limit_reached": "context_limit_reached_total",
+}
+
+
 @dataclass
 class RunOutcome:
     """一次任务的结果（协议适配器所需的全部信息）。"""
@@ -186,6 +199,11 @@ class ChatService:
             self.metrics.inc("request_context_limit_total")
         if code in ("generation_timeout", "generation_stalled"):
             self.metrics.inc("request_timeout_total")
+        # 失败类别计数（T3.4 / D3.4）：按错误码分类，让「归因收窄」可被观测。
+        # 用映射表而非 if 链——新增类别只改一处，也方便测试穷举全部键。
+        failure_counter = _FAILURE_COUNTERS.get(code)
+        if failure_counter is not None:
+            self.metrics.inc(failure_counter)
         raise exc
 
 

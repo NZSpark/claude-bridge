@@ -26,6 +26,12 @@ COUNTERS = (
     "session_recovery_total",
     "tool_call_total",
     "tool_parse_failure_total",
+    # 失败类别计数（T3.4 / D3.4）：按 ErrorCode 分类，便于在 /metrics 上验证
+    # 「归因收窄」（D3.3）是否把错误分对了类，而不是只看到一个笼统的 error 总数。
+    "usage_limit_reached_total",
+    "prompt_submission_failed_total",
+    "reply_not_found_total",
+    "context_limit_reached_total",
 )
 
 LATENCIES = (

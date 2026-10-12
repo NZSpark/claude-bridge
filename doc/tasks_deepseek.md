@@ -80,7 +80,8 @@
 - [x] **D3.1** 内部错误码（来源 4.6）：新增 `InternalError`（500），`_unhandled_handler` 与流式兜底不再把内部 bug 包成 `NotReadyError`。文件：`errors.py`、`server.py`、`tests/`。
 - [x] **D3.2** 去掉叠加重试（来源 4.6）：`fill_composer` 已重试 `FILL_RETRIES`；`generator._fill` 只对**可恢复的写入失败**再重试，`ComposerNotFound` 这类不可恢复错误不重试。文件：`generator.py`、`dom_adapter.py`、`tests/test_generation_latency.py`。
 - [x] **D3.3** 额度归因收窄（来源 4.6）：只在「没有新回复」或「弹窗仍在页面上」时报 `UsageLimitError`；已有正文后的停滞仍报停滞。文件：`generator.py`、`tests/test_generation_latency.py`。
-- [ ] **D3.4** 失败类别指标（来源 4.6、第 5 节）：为 `usage_limit_reached`、`prompt_submission_failed`、`reply_not_found`、`context_limit_reached`、取消各加计数。文件：`metrics.py`、`service.py`。
+- [x] **D3.4** 失败类别指标（来源 4.6、第 5 节）：为 `usage_limit_reached`、`prompt_submission_failed`、`reply_not_found`、`context_limit_reached`、取消各加计数。文件：`metrics.py`、`service.py`。
+  - **落地**：`metrics.COUNTERS` 增加四个 `*_total` 分类计数器；`service._FAILURE_COUNTERS` 用「错误码 → 计数器」映射表驱动（而非 if 链），在 `_record_failure` 末尾查表 `inc()`。取消沿用既有的 `request_cancelled_total`（它在更早分支就 `raise`，不进映射表），避免造出「写了没用上」的新死键。回归测试 `tests/test_failure_metrics.py` 五条：四类错误码各一条 + 成功路径对照，逐条断言「只增对应计数、不误增其它」。
 - [x] **D3.5** 配置路径与列表解析（来源 4.8）
   - `SESSION_FILE` / `USER_DATA_DIR` / `TASK_FILE_DIR` / `OUTPUT_DIR` 相对路径以 `PROJECT_ROOT` 为基准解析（换目录启动不再丢登录态）。
   - 选择器类配置**只按 `||` 切分**，不按逗号（避免 `:is(a,b)` 被切坏）。
