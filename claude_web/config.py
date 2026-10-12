@@ -458,3 +458,79 @@ if DEFAULT_MODEL_ALIAS not in MODEL_ALIASES:
 
 #: 兼容导出：部分调用方按 ``config.SUPPORTED_MODELS`` 读取别名清单。
 SUPPORTED_MODELS = list(MODEL_ALIASES.keys())
+
+
+# ==================== 13. 启动期校验与摘要（T3.6 / D3.6）====================
+
+#: 已废弃、仍被旧部署写入 .env 的键：读取它们会被静默忽略。
+#: 结束 / 停滞判定早已从「连续轮询次数」改为时长（见 POLL_INTERVAL_S 注释）。
+DEPRECATED_KEYS = ("STABLE_POLLS", "QUIET_POLLS", "STALL_POLLS")
+
+#: 摘要日志里要打印的键（**不含** BRIDGE_TOKEN / RESET_TOKEN 等密钥）。
+_SUMMARY_KEYS = (
+    "HOST",
+    "PORT",
+    "RESPONSE_TIMEOUT_S",
+    "RESPONSE_TIMEOUT_EXTEND_S",
+    "SETTLE_S",
+    "SETTLE_NO_SIGNAL_S",
+    "SUBMIT_LOST_S",
+    "STALL_S",
+    "POLL_INTERVAL_S",
+    "POLL_INTERVAL_ACTIVE_S",
+    "BUCKET_LOCK_TIMEOUT_S",
+    "ADMIN_LOCK_TIMEOUT_S",
+    "BUCKET_IDLE_TTL_S",
+    "MAX_PAGE_POOL",
+    "MAX_SESSION_BUCKETS",
+    "ENABLE_RESPONSES_API",
+    "SESSION_SCOPING",
+    "SESSION_FILE",
+    "USER_DATA_DIR",
+    "TASK_FILE_DIR",
+    "OUTPUT_DIR",
+)
+
+
+def config_warnings() -> List[str]:
+    """启动期配置体检：返回**人类可读的问题清单**（空 = 无问题）。
+
+    刻意**返回**而不是抛异常：默认值本身就命中其中一条
+    （``BUCKET_LOCK_TIMEOUT_S`` 120s < ``RESPONSE_TIMEOUT_S`` 300s），
+    若直接拒绝启动，等于默认配置都跑不起来。由调用方（server lifespan）
+    决定日志级别，既暴露问题又不破坏既有部署。
+    """
+    problems: List[str] = []
+
+    for key in DEPRECATED_KEYS:
+        if os.environ.get(key, "").strip():
+            problems.append(
+                f"{key} 已废弃：结束 / 停滞判定已改为时长（SETTLE_S / STALL_S），"
+                f"该键不再生效，请从 .env 删除。"
+            )
+
+    if BUCKET_LOCK_TIMEOUT_S < RESPONSE_TIMEOUT_S:
+        problems.append(
+            f"BUCKET_LOCK_TIMEOUT_S（{BUCKET_LOCK_TIMEOUT_S}s）< "
+            f"RESPONSE_TIMEOUT_S（{RESPONSE_TIMEOUT_S}s）：同桶排队请求会在"
+            f"前一个还在生成时先超时。建议把锁超时调到 >= 单轮超时。"
+        )
+
+    if SETTLE_NO_SIGNAL_S < SETTLE_S:
+        problems.append(
+            f"SETTLE_NO_SIGNAL_S（{SETTLE_NO_SIGNAL_S}s）< SETTLE_S（{SETTLE_S}s）："
+            f"「探不到信号」的兜底窗口不应比「已确认结束」的收尾窗口更短。"
+        )
+
+    if STALL_S <= SUBMIT_LOST_S:
+        problems.append(
+            f"STALL_S（{STALL_S}s）<= SUBMIT_LOST_S（{SUBMIT_LOST_S}s）："
+            f"停滞判定会先于「提交没生效」触发，归因会错报成停滞。"
+        )
+
+    return problems
+
+
+def summary_lines() -> List[str]:
+    """生效配置摘要（**不含任何密钥**），供启动日志逐行打印。"""
+    return [f"{key}={globals().get(key)!r}" for key in _SUMMARY_KEYS]

@@ -88,9 +88,10 @@
   - `LINK_ALLOWED_HOSTS=*` 时启动强告警。
   - 文件：`config.py`、`.env.example`、`tests/test_config.py`、`tests/test_config_drift.py`。
   - **落地**：新增 `env_path()`（相对路径以 `PROJECT_ROOT` 解析，绝对路径原样）；`env_list()` 只按 `||` 切分、逐项 strip、过滤空串，不再按逗号切；`LINK_ALLOWED_HOSTS` 含 `*` 时启动 `warnings.warn` 强告警。`test_config_drift.py` 的 `_ENV_CALL` 正则扩到 `env_path`，保证四处路径键被计入契约检查。
-- [ ] **D3.6** 启动校验与摘要日志（来源 4.8）
+- [x] **D3.6** 启动校验与摘要日志（来源 4.8）
   - 旧键（`STABLE_POLLS` / `QUIET_POLLS` / `STALL_POLLS`）告警；校验 `BUCKET_LOCK_TIMEOUT_S >= CLAUDE_TIMEOUT`、`SETTLE_NO_SIGNAL_S >= SETTLE_S`、`STALL_S > SUBMIT_LOST_S`；把生效值写进摘要日志（不含密钥）。
   - 文件：`config.py`、`server.py`、`tests/test_config.py`。
+  - **落地**：`config.config_warnings()` 返回问题清单（**不抛异常**——默认值本身命中「锁超时 120s < 单轮超时 300s」，抛异常会让默认配置启动失败）；`config.summary_lines()` 输出生效值（`_SUMMARY_KEYS` 不含密钥）。`server.lifespan` 逐条 `logger.warning("[启动配置] …")` 并打一行摘要。回归 `tests/test_startup_config.py` 七条：默认值冲突、旧键告警、一致时零告警、两条跨键约束、摘要不泄漏密钥。
 - [x] **D3.7** 会话比较与绑定（来源 4.7）
   - `_same_conversation` 与 `lifecycle.link` 落点校验改为解析 URL、**精确比较 `/chat/<ID>`**（现在用 `startswith(target[:len-1])`，会话 ID 只差最后一位会误判同一条）。
   - 绑定桶触顶后的处理：换新会话或明确报错，不再反复 `goto` 同一个已满会话。

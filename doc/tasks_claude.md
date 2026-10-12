@@ -83,7 +83,7 @@
   - 选择器类配置只按 `||` 切分，不按逗号。
   - `LINK_ALLOWED_HOSTS=*` 时启动强告警。
   - 文件：`config.py`、`.env.example`、`tests/test_config.py`、`tests/test_config_drift.py`。
-- [ ] **T3.6** 启动校验与摘要日志（来源 4.8）：旧键（`STABLE_POLLS` / `QUIET_POLLS` / `STALL_POLLS`）告警；校验 `BUCKET_LOCK_TIMEOUT_S >= CLAUDE_TIMEOUT`、`SETTLE_NO_SIGNAL_S >= SETTLE_S`、`STALL_S > SUBMIT_LOST_S`；把生效值写进摘要日志（不含密钥）。文件：`config.py`、`server.py`。
+- [x] **T3.6** 启动校验与摘要日志（来源 4.8）：旧键（`STABLE_POLLS` / `QUIET_POLLS` / `STALL_POLLS`）告警；校验 `BUCKET_LOCK_TIMEOUT_S >= CLAUDE_TIMEOUT`、`SETTLE_NO_SIGNAL_S >= SETTLE_S`、`STALL_S > SUBMIT_LOST_S`；把生效值写进摘要日志（不含密钥）。文件：`config.py`、`server.py`。（与 D3.6 同一处落地，见 `doc/updates_deepseek.md`）
 - [x] **T3.7** 会话比较与绑定（来源 4.7）
   - `_same_conversation` 与 `link` 落点校验改为解析 URL，精确比较 `/chat/<ID>`。
   - 绑定桶触顶后的处理：换新会话或明确报错，不再反复 goto 同一个已满会话。

@@ -135,6 +135,12 @@ async def lifespan(app: FastAPI):
         logger.warning("[启动] 未设置 BRIDGE_TOKEN：仅适合本机使用，请勿暴露到公网。")
     if not config.ENABLE_RESPONSES_API:
         logger.info("[启动] Responses API 未启用（ENABLE_RESPONSES_API=false）。")
+    # 启动期配置体检（T3.6 / D3.6）：旧键静默失效、跨键约束冲突都只打日志，
+    # 不拒绝启动——默认值本身就命中一条（锁超时 < 单轮超时），否则默认配置都跑不起来。
+    for problem in config.config_warnings():
+        logger.warning("[启动配置] %s", problem)
+    # 生效配置摘要（不含密钥）：出事后第一时间能核对「当时到底跑的是什么值」。
+    logger.info("[启动配置] 生效值：%s", " | ".join(config.summary_lines()))
     reaper = asyncio.create_task(_reap_idle_loop())
     try:
         yield
