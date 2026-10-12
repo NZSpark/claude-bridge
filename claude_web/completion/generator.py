@@ -346,7 +346,13 @@ class ReplyGenerator:
                 # 失败归因顺序：额度用尽 / 升级弹窗 > 会话到顶。前者更具体，也更常见
                 # （额度没了时页面同样不会再有新内容）。探测只在**即将判定失败**时做一次。
                 limit_modal = await self.dom.dismiss_limit_modal(page)
-                if limit_modal.quota_hit or limit_modal_seen:
+                # 归因收窄（T3.3）：只有在「现在仍能看到弹窗」或「本轮根本没读到新回复」
+                # 时才归因额度用尽。若已经读到了正文（说明本轮确实在生成，只是后来停滞 /
+                # 超时），不要用提交前那一次弹窗命中把停滞误报成额度问题。
+                quota_now = limit_modal.quota_hit
+                # 「本轮有实质正文」= 页面确实在生成；此时已有的正文是更可信的现场。
+                has_text_now = bool(normalized)
+                if quota_now or (limit_modal_seen and not has_text_now):
                     _log_end("失败：网页额度已用尽（页面弹出升级/额度弹窗）", chars=len(normalized))
                     raise UsageLimitError(
                         "网页版额度已用尽：页面弹出了升级/额度提示，本轮没有生成"

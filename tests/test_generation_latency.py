@@ -268,3 +268,26 @@ def test_pre_submit_wait_disabled_skips_probe(monkeypatch, default_timing):
     page = CountingPage(snapshots=["x"], generating_plan=[False])
     asyncio.run(ClaudeDOMAdapter().settle_before_submit(page, 0.0))
     assert page.count(selectors.GENERATING_STATE_JS) == 0
+
+
+def test_quota_modal_seen_at_submit_does_not_mask_a_real_stall(
+    clock: VirtualClock, monkeypatch, default_timing
+):
+    """回归（T3.3）：提交前见过额度弹窗，但本轮已读到实质正文后停滞 → 仍报停滞。
+
+    旧实现只要提交前命中过弹窗，任何失败都归因 ``usage_limit_reached``，会把
+    「已经在生成、只是后来卡住」误报成额度问题。
+    """
+    monkeypatch.setattr(config, "MAX_UPSTREAM_RETRIES", 0)
+    # 让「停滞」先于「落定」触发：真实场景里页面先自述在生成，随后停止生成信号，
+    # 但正文不再增长——此时应快速判停滞，而不是先等到落定阈值把残缺正文当完成返回。
+    monkeypatch.setattr(config, "STALL_S", 1.0)
+    page = FakePage(
+        snapshots=["已经写了一段正文"],  # 有实质正文
+        generating_plan=[True, False],  # 先「在生成」，随后停止生成信号但正文不再增长
+        limit_modal=LIMIT_MODAL_TEXT,  # 提交前命中弹窗（且会被关掉）
+    )
+    # 已读到实质正文：失败绝不能归因「额度用尽」，应是停滞一类。
+    with pytest.raises(GenerationStalledError) as excinfo:
+        asyncio.run(ReplyGenerator().generate(page, "hi"))
+    assert excinfo.value.code.value != "usage_limit_reached"
