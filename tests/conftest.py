@@ -19,6 +19,7 @@ def fast_config(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "SETTLE_NO_SIGNAL_S", 0.02)
     monkeypatch.setattr(config, "SUBMIT_LOST_S", 0.01)
     monkeypatch.setattr(config, "STALL_S", 0.05)
+    monkeypatch.setattr(config, "PRE_SUBMIT_WAIT_S", 0.0)
     monkeypatch.setattr(config, "RESPONSE_TIMEOUT_S", 5.0)
     monkeypatch.setattr(config, "RESPONSE_TIMEOUT_EXTEND_S", 0.0)
     monkeypatch.setattr(config, "FILL_RETRIES", 1)
@@ -63,5 +64,8 @@ def default_timing(monkeypatch):
         ("STALL_S", 30.0),
         ("RESPONSE_TIMEOUT_S", 300.0),
         ("RESPONSE_TIMEOUT_EXTEND_S", 0.0),
+        # 关掉「提交前等待页面结束生成」：这些用例测的是**提交之后**的轮询与收尾，
+        # 不应被 pre-submit 等待改写时长。T2.7 另有独立用例。
+        ("PRE_SUBMIT_WAIT_S", 0.0),
     ):
         monkeypatch.setattr(config, name, value)

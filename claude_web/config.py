@@ -206,6 +206,8 @@ SETTLE_NO_SIGNAL_S = env_float("SETTLE_NO_SIGNAL_S", 6.0)
 SUBMIT_LOST_S = env_float("SUBMIT_LOST_S", 6.0)
 #: 页面静止多久且正文无增长 → 判定停滞（快速失败，不再干等到绝对超时）。
 STALL_S = env_float("STALL_S", 30.0)
+#: 提交前若页面仍在生成：先等这么久（秒）；仍未结束就点一次停止控件（T2.7）。
+PRE_SUBMIT_WAIT_S = env_float("PRE_SUBMIT_WAIT_S", 3.0)
 
 
 # ==================== 8. 会话 ====================

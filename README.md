@@ -158,6 +158,7 @@ curl http://127.0.0.1:8003/v1/chat/completions -H 'Content-Type: application/jso
 | `POLL_INTERVAL_S` / `POLL_INTERVAL_ACTIVE_S` | `1.5` / `0.4` | 页面静止 / 活跃时的轮询间隔（秒，只影响「多快看到变化」） |
 | `SETTLE_S` / `SETTLE_NO_SIGNAL_S` | `2.5` / `6` | 页面自述已结束 / 探不到生成信号时，内容静默多久算完成（秒） |
 | `SUBMIT_LOST_S` / `STALL_S` | `6` / `30` | 判定「提交未生效」/「停滞」所需的静止时长（秒） |
+| `PRE_SUBMIT_WAIT_S` | `3` | 提交前若页面仍在生成，先等待的时长；仍未结束就点一次停止控件（0 = 不等） |
 | `REPLY_CHROME_SELECTORS` | 见 `.env.example` | 回复节点里要剔除的页面外壳（无障碍标题 / 动作栏 / 时间戳 / 推广行） |
 | `SESSION_KEY_HEADER` | `X-Claude-Session` | 会话分桶请求头 |
 | `MAX_SESSION_BUCKETS` / `BUCKET_LOCK_TIMEOUT_S` | `4` / `120` | 桶上限 / 同桶等待超时 |

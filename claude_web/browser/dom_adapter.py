@@ -331,6 +331,44 @@ class ClaudeDOMAdapter(DiagnosticsMixin):
         """页面是否仍在生成；探测失败返回 ``None``（未知）。"""
         return (await self.generating_state(page)).generating
 
+    async def stop_generation(self, page: Any) -> bool:
+        """点击**已确认的停止控件**以中断页面当前的生成（T2.7）。
+
+        只在探测到 ``generating_state`` 为真时调用；找不到控件返回 False。安全约束
+        与额度弹窗一致：只点「停止」类控件，绝不点其它按钮。失败不抛异常。
+        """
+        element, _ = await self._find_visible(page, config.GENERATING_SELECTORS)
+        if element is None:
+            return False
+        try:
+            await _maybe_await(element.click())
+            return True
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("[DOM] 点击停止控件失败：%s", type(exc).__name__)
+            return False
+
+    async def settle_before_submit(self, page: Any, wait_s: float) -> None:
+        """提交前确保页面不在生成中（T2.7）。
+
+        上一轮被取消 / 超时后页面可能仍在生成；此时提交新提示词，Enter 可能被站点忽略，
+        随后被误报成「提交未生效」。做法：先等 ``wait_s``，仍未结束就点一次停止控件。
+        **探测失败（未知）按「可提交」处理**，不阻塞正常请求。``wait_s <= 0`` 时
+        完全跳过（连探测都不做）：这是本能力的总开关，也让既有轮询时序不受影响。
+        """
+        if wait_s <= 0:
+            return
+        state = await self.generating_state(page)
+        if state.generating is not True:
+            return
+        if wait_s > 0:
+            await asyncio.sleep(wait_s)
+            state = await self.generating_state(page)
+            if state.generating is not True:
+                return
+        stopped = await self.stop_generation(page)
+        logger.info("[生成] 提交前页面仍在生成：%s", "已点停止控件" if stopped else "未找到停止控件")
+        await asyncio.sleep(min(wait_s, 1.0))
+
     # ---- 挡路弹窗（额度用尽 / 升级）----
     async def limit_modal_state(self, page: Any) -> ModalState:
         """探测「额度用尽 / 升级」类弹窗（只回布尔、命中特征与文本长度）。

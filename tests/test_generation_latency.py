@@ -229,3 +229,42 @@ def test_hard_timeout_stops_cleanly_when_page_already_settled(
     result = asyncio.run(ReplyGenerator().generate(page, "hi"))
     assert result.finish_reason == "stop"
     assert not any("截断" in note for note in result.notes)
+
+
+def test_pre_submit_clicks_stop_when_page_still_generating(monkeypatch, default_timing):
+    """回归（T2.7）：上一轮残留生成时，提交前点停止控件。
+
+    直接测 ``settle_before_submit``（不经完整 generate），避免回复循环的时序干扰。
+    """
+    from claude_web.browser.dom_adapter import ClaudeDOMAdapter
+
+    page = FakePage(
+        generating_plan=[True],  # 两次探测都报「在生成」
+        stop_button_available=True,
+    )
+    # 模拟「上一轮提交过、页面仍在生成」：fake 只在 submitted 后才报生成中。
+    page.submitted = True
+    asyncio.run(ClaudeDOMAdapter().settle_before_submit(page, 0.01))
+    assert page.stop_clicks == 1
+
+
+def test_pre_submit_waits_then_skips_stop_if_page_settles(monkeypatch, default_timing):
+    """页面在等待窗口内自行落定，就不该点停止控件。"""
+    from claude_web.browser.dom_adapter import ClaudeDOMAdapter
+
+    page = FakePage(
+        generating_plan=[True, False],  # 第二次探测已落定
+        stop_button_available=True,
+    )
+    page.submitted = True
+    asyncio.run(ClaudeDOMAdapter().settle_before_submit(page, 0.01))
+    assert page.stop_clicks == 0
+
+
+def test_pre_submit_wait_disabled_skips_probe(monkeypatch, default_timing):
+    """``PRE_SUBMIT_WAIT_S=0`` 时完全跳过（连探测都不做）。"""
+    from claude_web.browser.dom_adapter import ClaudeDOMAdapter
+
+    page = CountingPage(snapshots=["x"], generating_plan=[False])
+    asyncio.run(ClaudeDOMAdapter().settle_before_submit(page, 0.0))
+    assert page.count(selectors.GENERATING_STATE_JS) == 0

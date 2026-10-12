@@ -90,6 +90,7 @@ class FakePage:
         composer_available: bool = True,
         submit_lands: bool = True,
         stop_control_plan: Optional[List[bool]] = None,
+        stop_button_available: bool = False,
         url: str = "https://claude.ai/new",
         title_text: str = "Claude",
         user_messages: Optional[List[str]] = None,
@@ -104,6 +105,9 @@ class FakePage:
         self.generating_plan = generating_plan if generating_plan is not None else [False]
         #: 控件级信号（可见的停止按钮 / 全局流式标记）的计划值；缺省全为 False。
         self.stop_control_plan = stop_control_plan
+        #: ``query_selector_all`` 是否返回一个可点击的停止控件（与上面的信号解耦：
+        #: ``generating_state`` 读信号，``stop_generation`` 点控件）。
+        self.stop_button_available = stop_button_available
         #: 页面**自身**的文本（会被挑战文案扫描）。
         self.body_text = body_text
         #: 会话正文 / 输入区文本：探针会把它剔除，不属于「站点在拦你」的证据。
@@ -146,6 +150,8 @@ class FakePage:
         self.modal_dismissed = False
         self.modal_clicks = 0
         self.modal_escape_presses = 0
+        #: 可见停止控件被点击的次数（T2.7 的提交前停止）。
+        self.stop_clicks = 0
 
     # ---- 弹窗 ----
     def modal_visible(self) -> bool:
@@ -186,6 +192,10 @@ class FakePage:
             return [FakeElement(text) for text in self._reply_rows()]
         if self._is_user_message(selector):
             return [FakeElement(text) for text in self._user_rows()]
+        if self._is_stop(selector):
+            if self.stop_button_available:
+                return [FakeElement(on_click=self._on_stop_click)]
+            return []
         return []
 
     async def evaluate(self, expression: str, arg: Any = None) -> Any:
@@ -315,6 +325,14 @@ class FakePage:
             return False
         index = min(self.poll, len(self.stop_control_plan) - 1)
         return bool(self.stop_control_plan[index])
+
+    def _on_stop_click(self) -> None:
+        self.stop_clicks += 1
+
+    @staticmethod
+    def _is_stop(selector: str) -> bool:
+        lowered = selector.lower()
+        return "stop" in lowered or "data-is-streaming" in lowered
 
     @staticmethod
     def _is_input(selector: str) -> bool:

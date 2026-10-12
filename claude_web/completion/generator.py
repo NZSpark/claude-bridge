@@ -184,6 +184,10 @@ class ReplyGenerator:
             )
         baseline: ReplyBaseline = await self.extractor.baseline(page)
 
+        # 上一轮取消 / 失败后页面可能仍在生成：先等一小段，必要时点停止控件，
+        # 否则新提示词的 Enter 可能被站点忽略，被误报成「提交未生效」（T2.7）。
+        await self.dom.settle_before_submit(page, config.PRE_SUBMIT_WAIT_S)
+
         await self._fill(page, prompt)
         await self.dom.submit(page)
 
