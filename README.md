@@ -161,7 +161,7 @@ curl http://127.0.0.1:8003/v1/chat/completions -H 'Content-Type: application/jso
 | `PRE_SUBMIT_WAIT_S` | `3` | 提交前若页面仍在生成，先等待的时长；仍未结束就点一次停止控件（0 = 不等） |
 | `REPLY_CHROME_SELECTORS` | 见 `.env.example` | 回复节点里要剔除的页面外壳（无障碍标题 / 动作栏 / 时间戳 / 推广行） |
 | `SESSION_KEY_HEADER` | `X-Claude-Session` | 会话分桶请求头 |
-| `MAX_SESSION_BUCKETS` / `BUCKET_LOCK_TIMEOUT_S` | `4` / `120` | 桶上限 / 同桶等待超时 |
+| `MAX_SESSION_BUCKETS` / `BUCKET_LOCK_TIMEOUT_S` | `4` / `300` | 桶上限 / 同桶等待超时（应 >= `CLAUDE_TIMEOUT`） |
 | `BUCKET_IDLE_TTL_S` / `REAP_INTERVAL_S` | `900` / `60` | 空闲页面回收时长 / 后台回收任务间隔（0 = 关闭） |
 | `ADMIN_LOCK_TIMEOUT_S` | `10` | 管理操作（reset / link / unlink / modal）取桶锁的短超时；桶忙时快速返回忙碌错误，不打断在途任务 |
 | `CLAUDE_MAX_CONTEXT_CHARS` | `100000` | 桥接层独立的字符预算 |

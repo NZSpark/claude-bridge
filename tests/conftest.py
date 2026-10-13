@@ -64,6 +64,9 @@ def default_timing(monkeypatch):
         ("STALL_S", 30.0),
         ("RESPONSE_TIMEOUT_S", 300.0),
         ("RESPONSE_TIMEOUT_EXTEND_S", 0.0),
+        # 锁超时的**源码默认值**（A3.3 起为 300，>= 单轮超时）。这里显式钉住，
+        # 避免本机 .env 里的旧值（如 120）泄漏进「默认值」契约测试。
+        ("BUCKET_LOCK_TIMEOUT_S", 300.0),
         # 关掉「提交前等待页面结束生成」：这些用例测的是**提交之后**的轮询与收尾，
         # 不应被 pre-submit 等待改写时长。T2.7 另有独立用例。
         ("PRE_SUBMIT_WAIT_S", 0.0),

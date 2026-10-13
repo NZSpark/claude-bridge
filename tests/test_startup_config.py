@@ -9,13 +9,20 @@ from __future__ import annotations
 from claude_web import config
 
 
-def test_default_config_warns_about_lock_vs_timeout(default_timing):
-    """默认值本身命中「锁超时 < 单轮超时」——必须被检出，否则这条约束形同虚设。
+def test_default_config_has_no_lock_vs_timeout_conflict(default_timing):
+    """默认值本身不得命中「锁超时 < 单轮超时」（A3.3：默认值已从 120s 提到 300s）。
 
     用 ``default_timing`` fixture 把超时恢复成真实默认值：``conftest`` 的 autouse
-    ``fast_config`` 会把 ``RESPONSE_TIMEOUT_S`` 降到 5s（毫秒级跑测试），不恢复就
-    测不到这条默认值冲突。
+    ``fast_config`` 会把超时降到毫秒级（跑测试用），不恢复就测不准默认值。
     """
+    assert config.BUCKET_LOCK_TIMEOUT_S >= config.RESPONSE_TIMEOUT_S
+    problems = config.config_warnings()
+    assert not any("BUCKET_LOCK_TIMEOUT_S" in p for p in problems)
+
+
+def test_lock_below_timeout_is_reported(monkeypatch, default_timing):
+    """把锁超时降到单轮超时以下时必须被检出，否则这条跨键约束形同虚设。"""
+    monkeypatch.setattr(config, "BUCKET_LOCK_TIMEOUT_S", config.RESPONSE_TIMEOUT_S - 1)
     problems = config.config_warnings()
     assert any("BUCKET_LOCK_TIMEOUT_S" in p for p in problems)
 

@@ -243,7 +243,12 @@ SESSION_KEY_HEADER = env_str("SESSION_KEY_HEADER", "X-Claude-Session")
 SESSION_SCOPING_BY_UA = env_bool("SESSION_SCOPING_BY_UA", True)
 SESSION_KEY_MAX_LEN = env_int("SESSION_KEY_MAX_LEN", 64)
 MAX_SESSION_BUCKETS = env_int("MAX_SESSION_BUCKETS", 4)
-BUCKET_LOCK_TIMEOUT_S = env_float("BUCKET_LOCK_TIMEOUT_S", 120.0)
+#: 同桶等待锁的超时（秒）。
+#:
+#: 默认值必须 >= ``RESPONSE_TIMEOUT_S``：同桶的第二个请求要等第一个**完整跑完**一轮
+#: 生成才轮得到它。早先默认 120s < 单轮超时 300s，于是排队请求会在前一个请求仍
+#: 合法生成时就先超时（返回 503），表现为「同桶并发请求莫名失败」。
+BUCKET_LOCK_TIMEOUT_S = env_float("BUCKET_LOCK_TIMEOUT_S", 300.0)
 #: 管理类操作（reset / link / unlink / modal）取桶锁的**短超时**：桶正忙时快速
 #: 返回 ``session_busy``，而不是让管理命令也排队上百秒、更不会强行关掉在途任务的页面。
 ADMIN_LOCK_TIMEOUT_S = env_float("ADMIN_LOCK_TIMEOUT_S", 10.0)
