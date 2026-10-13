@@ -16,6 +16,19 @@ def test_removed_dead_keys_are_gone():
     assert not hasattr(config, "SAVE_DEBUG_ARTIFACTS")
 
 
+def test_warned_bad_state_shadow_flag_is_gone():
+    """`lock.WARNED_BAD_STATE` 是 `SessionStore._warned_bad_state` 的影子副本，必须删除。
+
+    真正的「状态文件损坏只 warning 一次」逻辑在 `SessionStore` 的实例属性里；模块级
+    的 `WARNED_BAD_STATE` 从未被读写，属「看起来有保护」的空壳（D6.3）。
+    """
+    from claude_web import session
+    from claude_web.session import lock
+
+    assert not hasattr(lock, "WARNED_BAD_STATE")
+    assert "WARNED_BAD_STATE" not in session.__all__
+
+
 def test_removed_keys_not_in_env_example():
     """删键必须同步 .env.example，否则漂移检查名不副实。"""
     text = (config.PROJECT_ROOT / ".env.example").read_text(encoding="utf-8")
@@ -60,3 +73,37 @@ def test_ready_timeout_is_wired():
 
     src = inspect.getsource(ClaudeWebDriver.readiness)
     assert "READY_TIMEOUT_MS" in src
+
+
+def test_model_is_supported_is_wired(caplog):
+    """未知模型别名要有一条诊断日志（`model_is_supported` 由此有了生产用点，D6.3）。"""
+    import logging
+
+    from claude_web.api.chat_adapter import to_task
+    from claude_web.models import ChatCompletionRequest
+
+    req = ChatCompletionRequest(
+        model="claude-web-does-not-exist",
+        messages=[{"role": "user", "content": "hi"}],
+    )
+    with caplog.at_level(logging.INFO, logger="claude_web.api.chat_adapter"):
+        task = to_task(req, "b")
+    # 宽松兼容：未知别名不报错，任务照常构造（沿用默认别名语义）。
+    assert task.model == "claude-web-does-not-exist"
+    assert any("未知模型别名" in rec.message for rec in caplog.records)
+
+
+def test_known_model_does_not_log_unknown(caplog):
+    """已知别名不该触发未知模型日志。"""
+    import logging
+
+    from claude_web.api.chat_adapter import to_task
+    from claude_web.models import ChatCompletionRequest
+
+    req = ChatCompletionRequest(
+        model=config.DEFAULT_MODEL_ALIAS,
+        messages=[{"role": "user", "content": "hi"}],
+    )
+    with caplog.at_level(logging.INFO, logger="claude_web.api.chat_adapter"):
+        to_task(req, "b")
+    assert not any("未知模型别名" in rec.message for rec in caplog.records)

@@ -21,8 +21,12 @@ from ..errors import (
     AuthenticationRequiredError,
     ChallengeRequiredError,
     ComposerNotFoundError,
+    NotReadyError,
     PromptSubmissionError,
     ReplyExtractionError,
+    is_page_lost_error,
+    is_timeout_error,
+    page_lost_reason,
 )
 from . import selectors
 from .diagnostics import DiagnosticsMixin
@@ -206,7 +210,18 @@ class ClaudeDOMAdapter(DiagnosticsMixin):
             try:
                 elements = await page.query_selector_all(selector)
             except Exception as exc:  # noqa: BLE001
-                hits.append(f"{selector}:{type(exc).__name__}")
+                # 区分两类失败（D6.3）：
+                #   * 页面已死（标签关闭 / 渲染进程崩溃）→ 不再试下一个选择器：那只会让
+                #     每个候选都白等一次超时，最终错误也更模糊。立刻抛 NotReadyError；
+                #   * 仅仅「等超时」→ 定位元素时只有它算「没命中」，记 ``:timeout``
+                #     后继续试下一个候选（其它异常按类型名记诊断）。
+                if is_page_lost_error(exc):
+                    raise NotReadyError(
+                        page_lost_reason(page),
+                        detail={"selector": selector, "error": type(exc).__name__},
+                    ) from exc
+                reason = "timeout" if is_timeout_error(exc) else type(exc).__name__
+                hits.append(f"{selector}:{reason}")
                 continue
             hits.append(f"{selector}:{len(elements)}")
             for element in elements:

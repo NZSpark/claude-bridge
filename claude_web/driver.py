@@ -24,7 +24,7 @@ from typing import Any, Optional
 
 from . import config
 from .browser.dom_adapter import ClaudeDOMAdapter, PageStatus
-from .errors import ErrorCode, NotReadyError
+from .errors import ErrorCode, NotReadyError, page_usable_reason
 from .page_pool import PagePool
 
 logger = logging.getLogger(__name__)
@@ -363,6 +363,17 @@ class ClaudeWebDriver:
             report.detail = {"error": type(exc).__name__}
             return report
         report.page = True
+        # 慢路径判活（A3.1 / D6.3）：渲染进程崩溃 / 挂起时 ``is_closed()`` 仍报 False，
+        # ``page_status`` 会退回默认值（``authenticated=True``、composer 取值陈旧），
+        # 只看那些字段会把一次失败探测报成 ``ok: true``。先走一遍
+        # :func:`page_usable_reason`（快路径判关闭 + 慢路径 JS 求值），不可用就直接
+        # 报 ``browser_unavailable``，不再继续拿陈旧 / 默认的 ``PageStatus`` 做判断。
+        unusable = await page_usable_reason(page)
+        if unusable is not None:
+            report.error = unusable
+            report.error_code = ErrorCode.BROWSER_UNAVAILABLE.value
+            report.detail = {"reason": unusable}
+            return report
         # 就绪探测受 READY_TIMEOUT_MS 约束（T6.2 / D6.2）：此前该配置声明了却从未
         # 被读；页面卡在加载中时 readiness 会一直挂着，调用方只能干等。
         try:

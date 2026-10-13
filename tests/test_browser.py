@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import asyncio
+from typing import Any
 
 import pytest
 
@@ -91,6 +92,111 @@ def test_page_usable_reason_accepts_live_page():
     from claude_web.errors import page_usable_reason
 
     assert asyncio.run(page_usable_reason(FakePage())) is None
+
+
+# ---- 页面已死时的快速失败（T6.3 / D6.3）----
+#
+# 回归背景：``_find_visible`` 逐个试 INPUT_SELECTORS 候选。页面已死（标签关闭 /
+# 渲染进程崩溃）时，旧行为是**每个**候选各自抛一次、各自白等一次超时，最终错误
+# 退化成「输入区没找到」（composer_not_found），掩盖了「页面根本没了」这个更准确、
+# 更可操作的原因。页面已死时应立刻抛 NotReadyError，不再试下一个选择器。
+
+
+class _PageClosedError(RuntimeError):
+    """模拟 Playwright 的 ``Target page, context or browser has been closed``。"""
+
+    def __init__(self) -> None:
+        super().__init__("Target page, context or browser has been closed")
+
+
+def test_find_visible_fails_fast_when_page_is_lost():
+    """页面已死时立刻抛 NotReadyError，而不是逐个候选白等到超时。"""
+    from claude_web.errors import NotReadyError
+
+    dom = ClaudeDOMAdapter()
+    page = FakePage(query_raise=_PageClosedError())
+    with pytest.raises(NotReadyError) as excinfo:
+        asyncio.run(dom._find_visible(page, config.INPUT_SELECTORS))
+    # 原因是「页面失效」，而不是「输入区没找到」。
+    assert "标签已失效" in excinfo.value.message
+    assert excinfo.value.detail["error"] == "_PageClosedError"
+
+
+def test_find_visible_keeps_trying_on_ordinary_selector_error():
+    """普通选择器异常（非页面失效）仍按旧行为继续试下一个候选。"""
+    dom = ClaudeDOMAdapter()
+    page = FakePage(query_raise=RuntimeError("ordinary selector error"))
+    element, hits = asyncio.run(dom._find_visible(page, config.INPUT_SELECTORS))
+    assert element is None
+    # 每个非空候选都试过（全部抛普通异常 → 全部记进命中明细）。
+    assert len(hits) == len([s for s in config.INPUT_SELECTORS if str(s).strip()])
+    assert all(hit.endswith(":RuntimeError") for hit in hits)
+
+
+def test_find_visible_labels_timeout_as_not_found():
+    """超时是「没命中」而非「异常」：记 ``:timeout`` 并继续试下一个候选（D6.3）。"""
+    dom = ClaudeDOMAdapter()
+    page = FakePage(query_raise=TimeoutError("waiting for selector"))
+    element, hits = asyncio.run(dom._find_visible(page, config.INPUT_SELECTORS))
+    assert element is None
+    assert len(hits) == len([s for s in config.INPUT_SELECTORS if str(s).strip()])
+    assert all(hit.endswith(":timeout") for hit in hits)
+
+
+def _readiness_driver(page: FakePage):
+    """构造一个「已启动」的 driver，其页面池直接返回给定替身。
+
+    只用来驱动 ``readiness`` 的判活 / 探测逻辑，不触碰真实 Playwright。
+    """
+    from claude_web.driver import ClaudeWebDriver
+    from claude_web.page_pool import PagePool
+
+    driver = ClaudeWebDriver()
+    driver._started = True
+    driver._context = object()
+    driver.pool = PagePool(closer=driver._close_page)
+    driver.pool.put(config.DEFAULT_SESSION_KEY, page)
+    return driver
+
+
+def test_readiness_flags_dead_but_unclosed_page():
+    """渲染进程崩溃 / 挂起（``is_closed()`` 仍 False）时 readiness 必须报不可用（A3.1）。
+
+    回归背景：``page_status`` 在 ``evaluate`` 失败后会退回默认值（``authenticated=True``），
+    只看那些字段会把一次失败探测报成 ``ok: true``。``readiness`` 现在先走
+    ``page_usable_reason``（含慢路径 JS 求值），死页面直接报 ``browser_unavailable``。
+    """
+    from claude_web.errors import ErrorCode
+
+    class _UnresponsivePage(FakePage):
+        async def evaluate(self, expression: str, arg: Any = None) -> Any:
+            raise RuntimeError("renderer crashed")
+
+    driver = _readiness_driver(_UnresponsivePage())
+    report = asyncio.run(driver.readiness())
+    assert report.ok is False
+    assert report.error_code == ErrorCode.BROWSER_UNAVAILABLE.value
+    assert "页面" in report.error
+
+
+def test_readiness_flags_closed_page():
+    """标签被关掉（快路径）时 readiness 同样必须报不可用。"""
+    from claude_web.errors import ErrorCode
+
+    page = FakePage()
+    page.closed = True
+    driver = _readiness_driver(page)
+    report = asyncio.run(driver.readiness())
+    assert report.ok is False
+    assert report.error_code == ErrorCode.BROWSER_UNAVAILABLE.value
+
+
+def test_readiness_ok_for_live_usable_page():
+    """活页面仍要正常报就绪，不能因为新增判活被误伤。"""
+    driver = _readiness_driver(FakePage())
+    report = asyncio.run(driver.readiness())
+    assert report.ok is True
+    assert report.error_code is None
 
 
 def _status(page: FakePage):

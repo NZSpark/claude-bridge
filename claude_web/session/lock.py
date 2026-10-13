@@ -20,9 +20,6 @@ from ..errors import SessionBusyError
 #: 保护状态文件「读改写」的进程内锁。
 STATE_FILE_LOCK = threading.Lock()
 
-#: 状态文件损坏时只提醒一次的标记（每轮都会读它，反复 warning 会刷屏）。
-WARNED_BAD_STATE = False
-
 
 class _Bucket:
     """单个会话桶的运行期锁与占用计数。"""
@@ -122,4 +119,4 @@ class BucketLockManager:
         self._buckets.clear()
 
 
-__all__ = ["STATE_FILE_LOCK", "WARNED_BAD_STATE", "BucketLockManager"]
+__all__ = ["STATE_FILE_LOCK", "BucketLockManager"]

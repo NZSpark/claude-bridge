@@ -100,6 +100,7 @@ class FakePage:
         modal_closable: bool = True,
         modal_click_works: bool = True,
         modal_escape_dismisses: bool = True,
+        query_raise: Optional[Exception] = None,
     ) -> None:
         self.snapshots = snapshots if snapshots is not None else ["Hello from Claude"]
         self.generating_plan = generating_plan if generating_plan is not None else [False]
@@ -152,6 +153,8 @@ class FakePage:
         self.modal_escape_presses = 0
         #: 可见停止控件被点击的次数（T2.7 的提交前停止）。
         self.stop_clicks = 0
+        #: 若设置，``query_selector_all`` 一律抛这个异常（模拟页面已死 / 渲染进程崩溃）。
+        self.query_raise = query_raise
 
     # ---- 弹窗 ----
     def modal_visible(self) -> bool:
@@ -186,6 +189,8 @@ class FakePage:
 
     async def query_selector_all(self, selector: str) -> List[FakeElement]:
         selector = selector.strip()
+        if self.query_raise is not None:
+            raise self.query_raise
         if self._is_input(selector):
             return [self.composer] if self.composer_available else []
         if self._is_response(selector):

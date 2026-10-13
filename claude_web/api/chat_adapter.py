@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import logging
 import time
 import uuid
 from typing import Any, Dict, List, Optional
@@ -25,9 +26,12 @@ from ..models import (
     FunctionCall,
     ToolCall,
     Usage,
+    model_is_supported,
 )
 from ..prompting import estimate_tokens, normalize_messages, normalize_tools
 from .streaming_adapter import SSE_DONE, sse_data
+
+logger = logging.getLogger(__name__)
 
 #: 单个 SSE content chunk 的最大字符数（更接近“流”的观感，且不破坏字符边界）。
 CHUNK_CHARS = 200
@@ -37,6 +41,10 @@ def to_task(request: ChatCompletionRequest, bucket: str) -> ChatTask:
     """把 OpenAI 请求转成内部任务模型（含消息归一化）。"""
     messages = normalize_messages(request.messages)
     tools = normalize_tools(request.tools)
+    # 未知别名不报错（宽松兼容），但记一条诊断：客户端拼错模型名时能从这里看出来
+    # （D6.3：`model_is_supported` 由此有了生产用点）。
+    if not model_is_supported(request.model):
+        logger.info("[模型] 请求了未知模型别名 %r，按默认别名处理", request.model)
     return ChatTask(
         messages=messages,
         model=request.model or config.DEFAULT_MODEL_ALIAS,

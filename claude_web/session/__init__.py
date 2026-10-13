@@ -4,7 +4,7 @@
 :mod:`claude_web.session_store`）。本包不依赖 HTTP 与浏览器层。
 """
 
-from .lock import STATE_FILE_LOCK, WARNED_BAD_STATE
+from .lock import STATE_FILE_LOCK
 from .schema import (
     STATE_SCHEMA_VERSION,
     SessionState,
@@ -16,7 +16,6 @@ from .store import SessionStore, default_store
 
 __all__ = [
     "STATE_FILE_LOCK",
-    "WARNED_BAD_STATE",
     "STATE_SCHEMA_VERSION",
     "SessionState",
     "empty_state_document",
