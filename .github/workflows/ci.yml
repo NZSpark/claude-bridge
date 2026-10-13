@@ -1,0 +1,35 @@
+# 最小 CI（D7.1）：ruff 静态检查 + pytest 离线套件。
+#
+# 默认测试套件**不联网、不启动浏览器**（tests/e2e/ 默认全部 skip，需 CLAUDE_E2E=1）。
+# e2e 需要真实登录态与浏览器，不适合放进 CI，留作手动触发（见 doc/e2e_test_design.md）。
+
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  lint-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+
+      - name: 安装依赖
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: ruff 静态检查
+        run: ruff check .
+
+      - name: mypy 类型检查（覆盖已全绿的子集，配置见 pyproject.toml）
+        run: mypy
+
+      - name: pytest（离线套件，e2e 自动 skip）
+        run: pytest -q

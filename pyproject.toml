@@ -19,6 +19,7 @@ dev = [
     "pytest>=8,<10",
     "httpx>=0.27,<1",   # fastapi.testclient 依赖
     "ruff>=0.6,<1",
+    "mypy>=1.11",       # 类型检查（D7.2：先只覆盖已全绿的四个模块）
     "openai>=1,<4",     # E2E 客户端冒烟测试用
 ]
 
@@ -52,3 +53,16 @@ select = ["E4", "E7", "E9", "F", "I"]
 [tool.ruff.lint.per-file-ignores]
 # driver.py 顶部先定义 playwright 占位、再惰性 import：E402 属有意为之。
 "claude_web/driver.py" = ["E402"]
+
+[tool.mypy]
+# 类型检查**从已全绿的子集开始**（D7.2）：errors / models / end_detection / session/*
+# 当前零错误；其余模块仍有 5 处历史遗留（toolcalls / page_pool / prompting /
+# responses_adapter / server），逐步修完后再扩大 files 清单。
+files = [
+    "claude_web/errors.py",
+    "claude_web/models.py",
+    "claude_web/end_detection.py",
+    "claude_web/session",
+]
+# 第三方库（playwright / fastapi 等）不强制带 stub，缺失时按 Any 处理，避免噪音。
+ignore_missing_imports = true
