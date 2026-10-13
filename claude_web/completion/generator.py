@@ -42,8 +42,10 @@ from ..errors import (
     UsageLimitError,
 )
 from ..models import ToolCall, ToolSpec
+from ..prompting import estimate_tokens
 from ..toolcalls import ParsedToolCalls, parse_tool_calls, strip_tool_call_blocks
 from .extractor import ReplyBaseline, ReplyExtractor, ReplyRead, normalize_reply
+from .token_speed import TokenSpeed, compute_speed
 
 logger = logging.getLogger(__name__)
 
@@ -69,6 +71,8 @@ class GenerationResult:
     saw_generating: bool = False
     rewritten: bool = False
     parse: Optional[ParsedToolCalls] = None
+    #: 本轮 token 速度观测（设计见 doc/tokenspeed.md）；仅成功轮次非 None。
+    speed: Optional[TokenSpeed] = None
 
     @property
     def has_tool_calls(self) -> bool:
@@ -181,6 +185,47 @@ class ReplyGenerator:
         assert last is not None
         raise last
 
+    def _compute_speed(
+        self,
+        *,
+        prompt: str,
+        reply: str,
+        t_submit: float,
+        t_first_text: Optional[float],
+        saw_generating: bool,
+        truncated: bool,
+    ) -> Optional[TokenSpeed]:
+        """用本轮计时锚点算 token 速度（口径见 ``doc/tokenspeed.md``）。
+
+        锚点（都用 ``time.monotonic()``，与循环里 ``now`` 同源）：
+
+        * ``t_submit``：``submit`` 返回的时刻（t3）；
+        * ``t_first_text``：首个**非空**回复文本出现的时刻（t5）；
+        * 调用时（t6）：循环已 ``break``，即内容落定。
+
+        未读到任何非空正文时返回 ``None``（无法定义 TTFT / decode）。
+        """
+        if t_first_text is None:
+            return None
+        t_settle = time.monotonic()
+        ttft_s = max(0.0, t_first_text - t_submit)
+        decode_s = max(0.0, t_settle - t_first_text)
+        # 修正项：decode 扣掉落定等待（仅当确实观测到生成中才扣）；prefill 扣半轮询周期。
+        settle_credit = config.SETTLE_S if saw_generating else 0.0
+        poll_credit = self.active_poll_interval / 2.0
+        return compute_speed(
+            prompt_chars=len(prompt),
+            reply_chars=len(reply),
+            prompt_tokens=estimate_tokens(prompt),
+            reply_tokens=estimate_tokens(reply),
+            ttft_s=ttft_s,
+            decode_s=decode_s,
+            settle_credit_s=settle_credit,
+            poll_credit_s=poll_credit,
+            saw_generating=saw_generating,
+            truncated=truncated,
+        )
+
     async def generate(
         self,
         page,
@@ -216,7 +261,9 @@ class ReplyGenerator:
         await self.dom.settle_before_submit(page, config.PRE_SUBMIT_WAIT_S)
 
         await self._fill(page, prompt)
+        # 计时锚点（doc/tokenspeed.md 第 2 节）：t3 = 提交完成；t5/t6 在轮询循环里采。
         await self.dom.submit(page)
+        t_submit = time.monotonic()
 
         timeout = timeout_s if timeout_s is not None else config.RESPONSE_TIMEOUT_S
         deadline = time.monotonic() + max(1.0, timeout)
@@ -225,6 +272,8 @@ class ReplyGenerator:
         state = EndState()
         limits = self.limits()
         clock = IdleClock()
+        #: 首个非空回复文本出现的时刻（t5，TTFT 的可观测代理）。
+        t_first_text: Optional[float] = None
         reply_seen = False
         normalized = ""
         last_normalized = ""
@@ -288,6 +337,9 @@ class ReplyGenerator:
             if read.is_new:
                 reply_seen = True
                 normalized = normalize_reply(read.text)
+                if t_first_text is None and normalized:
+                    # 首次读到**非空**正文：TTFT 的可观测代理（doc/tokenspeed.md 3.2）。
+                    t_first_text = now
                 if read.structural and not structural_logged:
                     # 正常轮次不会走到这里：一旦出现，说明**条数口径当时失灵**，
                     # 而结构信号把这一轮救了回来（下次查日志能直接看到）。
@@ -457,6 +509,14 @@ class ReplyGenerator:
             polls=polls,
             saw_generating=state.saw_generating,
             rewritten=rewritten,
+        )
+        result.speed = self._compute_speed(
+            prompt=prompt,
+            reply=result.text,
+            t_submit=t_submit,
+            t_first_text=t_first_text,
+            saw_generating=state.saw_generating,
+            truncated=verdict.truncated,
         )
         if verdict.truncated:
             result.notes.append("回复被硬超时截断：页面仍在生成，延长额度已耗尽")

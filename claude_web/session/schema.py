@@ -27,6 +27,10 @@ _SESSION_FIELDS = frozenset(
         "pending_reseed",
         "history_len",
         "history_digest",
+        "speed_samples",
+        "speed_prefill_tps_sum",
+        "speed_decode_tps_sum",
+        "speed_ttft_s_sum",
     }
 )
 
@@ -82,6 +86,12 @@ class SessionState:
     #: 上下文已经分叉（回滚 / 重新生成 / 换任务 / 压缩），届时打日志提示。
     history_len: int = 0
     history_digest: str = ""
+    #: Token 速度滚动平均（doc/tokenspeed.md 5.3）：只累计**数值和**与样本数，
+    #: 不落盘正文、不保存每次明细。缺失时按 0 处理（向后兼容旧状态文件）。
+    speed_samples: int = 0
+    speed_prefill_tps_sum: float = 0.0
+    speed_decode_tps_sum: float = 0.0
+    speed_ttft_s_sum: float = 0.0
 
     def to_payload(self) -> Dict[str, Any]:
         return asdict(self)
@@ -99,6 +109,15 @@ class SessionState:
                 setattr(state, name, int(payload.get(name) or 0))
             except (TypeError, ValueError):
                 setattr(state, name, 0)
+        for name in ("speed_prefill_tps_sum", "speed_decode_tps_sum", "speed_ttft_s_sum"):
+            try:
+                setattr(state, name, float(payload.get(name) or 0.0))
+            except (TypeError, ValueError):
+                setattr(state, name, 0.0)
+        try:
+            state.speed_samples = int(payload.get("speed_samples") or 0)
+        except (TypeError, ValueError):
+            state.speed_samples = 0
         last_error = payload.get("last_error")
         state.last_error = last_error if isinstance(last_error, str) else None
         linked = payload.get("linked_url")

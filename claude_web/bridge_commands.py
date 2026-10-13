@@ -49,6 +49,7 @@ _USAGE = (
     f"{BRIDGE_COMMAND} 用法：\n"
     f"  {BRIDGE_COMMAND} help [{'|'.join(HELP_TOPICS)}]  命令列表 / 分主题帮助\n"
     f"  {BRIDGE_COMMAND} status  桥接与当前会话桶状态摘要\n"
+    f"  {BRIDGE_COMMAND} token  最近一轮与本桶平均的 token 速度（prefill/decode）\n"
     f"  {BRIDGE_COMMAND} models  本桥对外公布的模型名（同 GET /v1/models）\n"
     f"  {BRIDGE_COMMAND} modal  关闭挡路的额度/升级弹窗（不改变会话状态）\n"
     f"  {BRIDGE_COMMAND} session [status]  当前桶的会话状态摘要\n"
@@ -75,6 +76,10 @@ class CommandSpec:
 REGISTRY: tuple = (
     CommandSpec(f"{BRIDGE_COMMAND} help [{'|'.join(HELP_TOPICS)}]", "查看命令列表 / 分主题帮助"),
     CommandSpec(f"{BRIDGE_COMMAND} status", "桥接、浏览器与当前会话桶的状态摘要"),
+    CommandSpec(
+        f"{BRIDGE_COMMAND} token",
+        "最近一轮与本桶平均的 token 速度（prefill / decode），口径见 doc/tokenspeed.md",
+    ),
     CommandSpec(f"{BRIDGE_COMMAND} models", "本桥对外公布的模型名（与 GET /v1/models 同源）"),
     CommandSpec(
         f"{BRIDGE_COMMAND} modal",
@@ -155,6 +160,10 @@ def parse_command(text: str) -> Optional[BridgeCommand]:
         if rest:
             return _invalid(f"{BRIDGE_COMMAND} status 不接受参数。")
         return BridgeCommand("status")
+    if head in ("token", "speed", "tokens"):
+        if rest:
+            return _invalid(f"{BRIDGE_COMMAND} token 不接受参数。")
+        return BridgeCommand("token")
     if head == "models":
         if rest:
             return _invalid(f"{BRIDGE_COMMAND} models 不接受参数。")
@@ -303,6 +312,8 @@ async def _execute(command: BridgeCommand, service: Any, bucket: str) -> str:
         return _help_reply(command.subaction)
     if command.action == "status":
         return _status_reply(service, bucket)
+    if command.action == "token":
+        return _token_reply(service, bucket)
     if command.action == "models":
         return _models_reply()
     if command.action == "modal":
@@ -500,6 +511,72 @@ def _status_reply(service: Any, bucket: str) -> str:
     if stats.get("last_error"):
         lines.append(f" 最近错误：{_one_line(str(stats.get('last_error')))}")
     lines.append(" 登录 / 输入区是否就绪要真的打开页面探测：GET /readiness")
+    return "\n".join(lines)
+
+
+def _fmt_int(value: float) -> str:
+    """整数化并加千位分隔符（速度值保留到整数 tok/s）。"""
+    return f"{int(round(float(value or 0.0))):,}"
+
+
+def _fmt_s(value: float) -> str:
+    """时长保留 1 位小数。"""
+    return f"{float(value or 0.0):.1f}s"
+
+
+def _token_reply(service: Any, bucket: str) -> str:
+    """最近一轮与本桶平均的 token 速度（口径见 ``doc/tokenspeed.md``）。
+
+    只读命令：不导航页面、不触发生成；只输出计数与时长，不回显提示词 / 回复正文。
+    本轮数字来自 ``service.latest_speed(bucket)``（成功轮次写入），平均来自会话状态。
+    """
+    stats = service.lifecycle.status(bucket)
+    latest = service.latest_speed(bucket) if hasattr(service, "latest_speed") else None
+    lines = [f"[Bridge] token 速度（桶 {bucket}；本轮 = 最近一次成功生成）："]
+    if latest is None:
+        lines.append(" 本轮：暂无样本（本进程启动后还没有成功的生成）。先发一轮普通请求。")
+    else:
+        d = latest.as_detail()
+        note = ""
+        if d.get("rewritten"):
+            note = "（本轮有重写，速度仅供参考）"
+        if d.get("truncated"):
+            note = "（本轮被硬超时截断，速度偏低）"
+        short = "（样本过短，仅供参考）" if int(d.get("reply_tokens") or 0) < 50 else ""
+        lines.append(" 本轮：")
+        lines.append(
+            f"   prefill  {_fmt_int(d.get('prefill_tps'))} tok/s"
+            f"   （输入 {_fmt_int(d.get('prompt_tokens'))} tok / 首字 {_fmt_s(d.get('ttft_s'))}）"
+        )
+        lines.append(
+            f"   decode   {_fmt_int(d.get('decode_tps'))} tok/s"
+            f"   （输出 {_fmt_int(d.get('reply_tokens'))} tok / 解码 {_fmt_s(d.get('decode_s'))}）"
+        )
+        lines.append(
+            f"   TTFT {_fmt_s(d.get('ttft_s'))}（修正后 {_fmt_s(d.get('ttft_adj_s'))}，"
+            f"扣轮询 {_fmt_s(d.get('poll_credit_s'))}）；"
+            f" decode {_fmt_s(d.get('decode_s'))}（修正后 {_fmt_s(d.get('decode_adj_s'))}，"
+            f"扣落定 {_fmt_s(d.get('settle_credit_s'))}）"
+        )
+        if d.get("e2e_ttft_s") is not None:
+            lines.append(
+                f"   端到端：TTFT {_fmt_s(d.get('e2e_ttft_s'))}，"
+                f"流式 decode {_fmt_int(d.get('e2e_decode_tps'))} tok/s"
+            )
+        if note or short:
+            lines.append(f"   {note}{short}")
+    samples = int(stats.get("speed_samples") or 0)
+    if samples:
+        lines.append(f" 本桶平均（近 {samples} 轮）：")
+        lines.append(f"   prefill  {_fmt_int(stats.get('speed_prefill_tps_avg'))} tok/s")
+        lines.append(f"   decode   {_fmt_int(stats.get('speed_decode_tps_avg'))} tok/s")
+        lines.append(f"   TTFT {_fmt_s(stats.get('speed_ttft_s_avg'))}")
+    else:
+        lines.append(" 本桶平均：暂无样本。")
+    lines.append(
+        " 口径：token 数为字符数/3 的估算；速度为「网页版真实链路下的有效速度」，"
+        "非模型裸速度。仅统计成功的生成。详见 doc/tokenspeed.md。"
+    )
     return "\n".join(lines)
 
 

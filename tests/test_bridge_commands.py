@@ -103,7 +103,95 @@ def test_status_reply_works_when_browser_unavailable(tmp_path):
     reply = asyncio.run(handle_command([{"role": "user", "content": "/bridge status"}], service, BUCKET))
     assert reply is not None
     assert "[Bridge] 桥接状态" in reply
-    assert "尚未启动" in reply
+
+
+# ==================== /bridge token ====================
+
+
+def test_token_aliases_parse():
+    for name in ("token", "speed", "tokens"):
+        command = parse_command(f"/bridge {name}")
+        assert command is not None and command.action == "token"
+
+
+def test_token_rejects_arguments():
+    command = parse_command("/bridge token now")
+    assert command is not None and command.action == "invalid"
+
+
+def test_token_reply_without_samples(tmp_path):
+    """没有成功生成时如实说「暂无样本」，不报错。"""
+    import asyncio
+
+    service = _service(FakePage(), tmp_path)
+    reply = asyncio.run(
+        handle_command([{"role": "user", "content": "/bridge token"}], service, BUCKET)
+    )
+    assert reply is not None
+    assert "token 速度" in reply
+    assert "暂无样本" in reply
+    # 口径声明必须存在，避免用户把估算当精确值。
+    assert "估算" in reply
+
+
+def test_token_reply_shows_latest_and_average(tmp_path):
+    """有样本时同时显示「本轮」与「本桶平均」，并标注口径。"""
+    import asyncio
+
+    from claude_web.completion.token_speed import compute_speed
+
+    service = _service(FakePage(), tmp_path)
+    speed = compute_speed(
+        prompt_chars=3000,
+        reply_chars=300,
+        prompt_tokens=1000,
+        reply_tokens=100,
+        ttft_s=2.0,
+        decode_s=10.0,
+    )
+    service._latest_speed[BUCKET] = speed
+    # 累加一次平均样本（模拟一次成功生成）。
+    service.lifecycle.note_success(BUCKET, speed=speed)
+    reply = asyncio.run(
+        handle_command([{"role": "user", "content": "/bridge token"}], service, BUCKET)
+    )
+    assert reply is not None
+    assert "prefill" in reply and "decode" in reply
+    assert "本桶平均" in reply
+    assert "tok/s" in reply
+    # 1000 tok / 2.0s = 500 tok/s；100 tok / 10.0s = 10 tok/s。
+    assert "500" in reply
+    assert "10 " in reply or "10\n" in reply or "10" in reply
+
+
+def test_token_reply_flags_short_sample(tmp_path):
+    """输出 token 过少时提示「样本过短」。"""
+    import asyncio
+
+    from claude_web.completion.token_speed import compute_speed
+
+    service = _service(FakePage(), tmp_path)
+    speed = compute_speed(
+        prompt_chars=300,
+        reply_chars=9,
+        prompt_tokens=100,
+        reply_tokens=3,
+        ttft_s=1.0,
+        decode_s=1.0,
+    )
+    service._latest_speed[BUCKET] = speed
+    reply = asyncio.run(
+        handle_command([{"role": "user", "content": "/bridge token"}], service, BUCKET)
+    )
+    assert reply is not None
+    assert "样本过短" in reply
+
+
+def test_help_lists_token_command():
+    from claude_web.bridge_commands import _help_reply
+
+    reply = _help_reply("")
+    assert "/bridge token" in reply
 
 
 def test_modal_command_closes_limit_popup(tmp_path):

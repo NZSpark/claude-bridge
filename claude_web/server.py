@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import secrets
+import time
 from contextlib import asynccontextmanager
 from typing import Any, AsyncIterator, Dict, Optional
 
@@ -36,6 +37,7 @@ from .api.responses_adapter import (
 from .api.streaming_adapter import sse_comment, sse_error
 from .bridge_commands import handle_command
 from .browser.selectors import SELECTOR_VERSION
+from .completion.token_speed import TokenSpeed, apply_e2e
 from .errors import (
     BridgeError,
     ErrorCode,
@@ -476,6 +478,18 @@ def _include_usage(task: ChatTask) -> bool:
     return bool(opts.get("include_usage"))
 
 
+def _fill_e2e(speed: Optional[TokenSpeed], t0: float, t_first_content: Optional[float]) -> None:
+    """流式收尾时把端到端时长填进 ``speed``（无首正文 / 无 speed 时静默跳过）。"""
+    if speed is None or t_first_content is None:
+        return
+    t_done = time.monotonic()
+    apply_e2e(
+        speed,
+        ttft_s=t_first_content - t0,
+        decode_s=t_done - t_first_content,
+    )
+
+
 async def _stream_bridge_reply(task: ChatTask, reply: str) -> AsyncIterator[str]:
     """桥内命令的本地 SSE：没有上游生成，直接一次性吐出应答。"""
     encoder = StreamEncoder(task.model)
@@ -493,6 +507,10 @@ async def _stream_chat_completion(
     encoder = StreamEncoder(task.model)
     queue: "asyncio.Queue" = asyncio.Queue()
     cancel = asyncio.Event()
+    # 端到端口径计时锚点（doc/tokenspeed.md 3.4 / 5.1）：t0 在流开始；
+    # 首个含正文的 chunk 写出时记 t_first_content；收尾（[DONE]）时把 e2e 填进 speed。
+    t0 = time.monotonic()
+    t_first_content: Optional[float] = None
 
     async def on_delta(text: str) -> None:
         await queue.put(("delta", text))
@@ -535,6 +553,8 @@ async def _stream_chat_completion(
                     rewritten = True
                 elif piece:
                     sent = payload
+                    if t_first_content is None:
+                        t_first_content = time.monotonic()
                     for chunk in encoder.content(piece):
                         yield chunk
             elif kind == "result":
@@ -555,6 +575,7 @@ async def _stream_chat_completion(
                     yield encoder.usage(
                         estimate_usage(outcome.conversation.prompt, outcome.result.text)
                     )
+                _fill_e2e(outcome.result.speed, t0, t_first_content)
                 yield encoder.done()
                 return
             elif kind == "error":

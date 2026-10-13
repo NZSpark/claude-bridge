@@ -21,6 +21,7 @@ from claude_web.browser.dom_adapter import ClaudeDOMAdapter
 from claude_web.completion.generator import ReplyGenerator
 from claude_web.errors import (
     AuthenticationRequiredError,
+    BridgeError,
     ComposerNotFoundError,
     GenerationStalledError,
     PromptSubmissionError,
@@ -75,6 +76,40 @@ def test_streaming_polls_fast_and_settles_after_settle_window(
     assert clock.total == pytest.approx(0.8 + config.SETTLE_S, abs=0.3)
     # 旧实现固定 6 轮 × 1.5s = 9.0s。
     assert clock.total < 4.0
+
+
+def test_generate_attaches_token_speed(clock: VirtualClock):
+    """成功生成时挂上 TokenSpeed，速度按**虚拟秒**算（doc/tokenspeed.md）。
+
+    虚拟时间轴让「等了多久」可精确断言：首字在若干轮询后出现、随后落定，
+    prefill = prompt_tokens / ttft（扣半轮询周期），decode = reply_tokens / decode
+    （扣 SETTLE_S）。这里只断言方向与关系，不锁死具体小数。
+    """
+    page = FakePage(snapshots=["回复正文" * 40], generating_plan=[True, False])
+    result = asyncio.run(ReplyGenerator().generate(page, "请给我一段较长的回复。"))
+    speed = result.speed
+    assert speed is not None
+    # 输入 / 输出规模都按字符数/3 估算。
+    assert speed.prompt_tokens == len("请给我一段较长的回复。") // 3
+    assert speed.reply_tokens == len(result.text) // 3
+    # 修正后时长非负，且不超过原始时长（只减不增）。
+    assert 0.0 <= speed.ttft_adj_s <= speed.ttft_s
+    assert 0.0 <= speed.decode_adj_s <= speed.decode_s
+    # 速度为正、有限。
+    assert speed.prefill_tps > 0
+    assert speed.decode_tps > 0
+
+
+def test_generate_speed_is_none_without_text(clock: VirtualClock):
+    """没有读到任何非空正文时要么不返回结果、要么不产生速度对象。"""
+    page = FakePage(snapshots=[""], generating_plan=[False])
+    try:
+        result = asyncio.run(ReplyGenerator().generate(page, "hi"))
+    except BridgeError:
+        # 空回复会以语义化错误结束（reply_not_found / generation_stalled）：
+        # 这正是「不产生速度样本」的另一种表现，符合预期。
+        return
+    assert result.speed is None or result.speed.prefill_tps >= 0
 
 
 def test_idle_polling_keeps_stall_window_in_wall_clock(

@@ -138,7 +138,7 @@ curl http://127.0.0.1:8003/v1/chat/completions -H 'Content-Type: application/jso
   -d '{"messages":[{"role":"user","content":"/bridge link https://claude.ai/chat/<会话 ID>"}]}'
 ```
 
-可用命令：`help`、`status`、`models`、`session [status]`、`session reset`、
+可用命令：`help`、`status`、`token`、`models`、`session [status]`、`session reset`、
 `session link <URL> [--seed]`、`session unlink`（`link` / `unlink` / `reset` 可省略
 `session` 直接写）。只有「整条消息就是那一行」才算命令 —— 正文里提到 `/bridge` 照样
 发给网页版。完整语义见 [doc/bridge_commands.md](doc/bridge_commands.md)。

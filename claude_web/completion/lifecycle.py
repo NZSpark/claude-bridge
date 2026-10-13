@@ -286,6 +286,7 @@ class SessionLifecycle:
         system_digest: str = "",
         history_len: int = 0,
         history_digest: str = "",
+        speed: Any = None,
     ) -> None:
         state = self.store.state(bucket)
         state.has_history = True
@@ -295,6 +296,12 @@ class SessionLifecycle:
         state.cap_failures = 0
         state.last_error = None
         state.pending_reseed = False
+        # Token 速度滚动平均（doc/tokenspeed.md 5.3）：只累加数值和与样本数。
+        if speed is not None:
+            state.speed_samples += 1
+            state.speed_prefill_tps_sum += float(getattr(speed, "prefill_tps", 0.0) or 0.0)
+            state.speed_decode_tps_sum += float(getattr(speed, "decode_tps", 0.0) or 0.0)
+            state.speed_ttft_s_sum += float(getattr(speed, "ttft_adj_s", 0.0) or 0.0)
         # 记录「这一轮同步进网页会话的客户端历史」指纹，供下一轮一致性观测（T1.4a）。
         if history_len:
             state.history_len = int(history_len)
@@ -365,6 +372,22 @@ class SessionLifecycle:
             "cap_hit": state.cap_hit,
             "last_error": state.last_error,
             "pending_reseed": state.pending_reseed,
+            "speed_samples": state.speed_samples,
+            "speed_prefill_tps_avg": (
+                state.speed_prefill_tps_sum / state.speed_samples
+                if state.speed_samples
+                else 0.0
+            ),
+            "speed_decode_tps_avg": (
+                state.speed_decode_tps_sum / state.speed_samples
+                if state.speed_samples
+                else 0.0
+            ),
+            "speed_ttft_s_avg": (
+                state.speed_ttft_s_sum / state.speed_samples
+                if state.speed_samples
+                else 0.0
+            ),
         }
 
     @staticmethod

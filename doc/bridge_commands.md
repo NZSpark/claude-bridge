@@ -10,6 +10,7 @@
 | --- | --- | --- |
 | `/bridge help [session]` | 命令列表 / 分主题帮助 | 只读 |
 | `/bridge status` | 桥接、浏览器与当前桶的状态摘要 | 只读 |
+| `/bridge token` | 最近一轮与本桶平均的 token 速度（prefill / decode） | 只读 |
 | `/bridge models` | 本桥公布的模型名（与 `GET /v1/models` 同源） | 只读 |
 | `/bridge modal` | 关闭挡路的额度 / 升级弹窗（只点关闭类控件） | 改页面 |
 | `/bridge session [status]` | 当前桶的会话状态摘要 | 只读 |
@@ -17,7 +18,10 @@
 | `/bridge session link <URL> [--seed]` | 把当前桶绑定到指定网页会话 | 改状态 |
 | `/bridge session unlink` | 解除当前桶的会话绑定 | 改状态 |
 
-- 裸 `/bridge` 等于 `/bridge help`；`/bridge popup` 是 `/bridge modal` 的别名。
+- 裸 `/bridge` 等于 `/bridge help`；`/bridge popup` 是 `/bridge modal` 的别名；
+  `/bridge speed` / `/bridge tokens` 是 `/bridge token` 的别名。
+- `/bridge token` 的口径（token 数为估算、速度为「网页版真实链路下的有效速度」而非
+  模型裸速度）见 [tokenspeed.md](tokenspeed.md)。
 - `/bridge modal` 只点**关闭 / 先不用**类控件，不点升级或付费按钮，也不改会话状态；
   它回答「页面上到底有没有这个弹窗」，而生成链路每轮开始本来就会自己关一次。
 - `link` / `unlink` / `reset` 可以省略 `session` 直接写（`/bridge link <URL>`）。

@@ -80,6 +80,34 @@ def test_stream_completion_concatenates_and_terminates(build_client):
     assert done is True
 
 
+def test_stream_fills_e2e_speed(build_client):
+    """流式收尾时把端到端 TTFT / decode 速度填进该桶的最近速度（doc/tokenspeed.md 3.4）。"""
+    page = FakePage(
+        snapshots=["Hello", "Hello world", "Hello world"],
+        generating_plan=[True, True, False],
+    )
+    client, svc = build_client(page)
+    resp = _chat(client, stream=True)
+    assert resp.status_code == 200
+    speed = svc.latest_speed("default")
+    assert speed is not None
+    assert speed.streamed is True
+    assert speed.e2e_ttft_s is not None and speed.e2e_ttft_s >= 0
+    assert speed.e2e_decode_tps is not None and speed.e2e_decode_tps >= 0
+
+
+def test_non_stream_has_no_e2e_speed(build_client):
+    """非流式路径没有端到端口径（没有增量到达的概念）。"""
+    client, svc = build_client(FakePage(snapshots=["Hello there!"], generating_plan=[False]))
+    resp = _chat(client)
+    assert resp.status_code == 200
+    speed = svc.latest_speed("default")
+    assert speed is not None
+    assert speed.streamed is False
+    assert speed.e2e_ttft_s is None
+    assert speed.e2e_decode_tps is None
+
+
 def test_stream_content_starts_with_role_chunk(build_client):
     client, _ = build_client(FakePage(snapshots=["ok"], generating_plan=[False]))
     resp = _chat(client, stream=True)

@@ -9,7 +9,7 @@ from __future__ import annotations
 import logging
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
-from typing import Callable, Optional
+from typing import Any, Callable, Dict, Optional
 
 from . import config
 from .completion.generator import DeltaCallback, GenerationResult, ReplyGenerator
@@ -71,6 +71,13 @@ class ChatService:
         self.locks = locks or BucketLockManager()
         self.tasks = tasks or default_task_store
         self.metrics = metrics or default_metrics
+        #: 每个桶最近一次成功生成的 token 速度（doc/tokenspeed.md 5.3）。
+        #: 只在内存里保留最近一次，供 `/bridge token` 的「本轮」显示；进程重启即清空。
+        self._latest_speed: Dict[str, Any] = {}
+
+    def latest_speed(self, bucket: str) -> Optional[Any]:
+        """该桶最近一次成功生成的 :class:`~claude_web.completion.token_speed.TokenSpeed`。"""
+        return self._latest_speed.get(bucket or config.DEFAULT_SESSION_KEY)
 
     async def run(
         self,
@@ -168,6 +175,8 @@ class ChatService:
         snapshot.state = "completed"
         snapshot.last_reply = result.text
         self.tasks.save(snapshot)
+        if result.speed is not None:
+            self._latest_speed[task.bucket] = result.speed
         # 传页面与系统提示摘要：只有本轮真的成功，网页会话里才确实有了这段上下文
         # （下一轮才能只发增量），也才知道客户端是否换过系统提示。
         self.lifecycle.note_success(
@@ -176,6 +185,7 @@ class ChatService:
             system_digest=conversation.system_digest,
             history_len=conversation.history_len,
             history_digest=conversation.history_digest,
+            speed=result.speed,
         )
         if result.has_tool_calls:
             self.metrics.inc("tool_call_total")
