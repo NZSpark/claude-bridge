@@ -150,19 +150,32 @@
 > 每项二选一：**接上，或删除并同步 `design.md`**。不要保留「看起来有保护」的空壳。
 
 - [ ] **D6.1** 指标：`request_retry_total`、`browser_unavailable_total`、`browser_selector_miss_total`、`reply_extraction_failure_total`、`session_recovery_total`、`tool_parse_failure_total`、`request_latency`、`reply_extraction_latency`。
+  - **2026-10-13 复核**：`metrics.COUNTERS` / `LATENCIES` 里**已声明**这 8 个，但除 `browser_generation_latency` 外**全部无调用点**（`grep -rn '\.inc(' claude_web/` 只命中 9 个计数器，不含这 6 个；`request_latency` / `reply_extraction_latency` 亦无 `timer()`）。属「声明了没接」的空壳，D6 原则要求接上或删除——**未完成**。
 - [x] **D6.2** 配置与字段：`STREAM_KEEPALIVE_S`（见 D4.1）、`TASK_KEEP_MESSAGES`、`READY_TIMEOUT_MS`、`FILL_TIMEOUT_MS`、`NEW_SESSION_ON_START`、`SAVE_DEBUG_ARTIFACTS`、`SessionState.cap_failures`、`TaskSnapshot.messages / recoveries`、状态 `queued / generating / recovering`。
   - **接线（3 项）**：`FILL_TIMEOUT_MS` 包住 `fill_composer` 重试循环（超时抛 `PromptSubmissionError`）；`READY_TIMEOUT_MS` 包住 `readiness` 的 `page_status` 探测（超时回 `browser_unavailable`）；`TASK_KEEP_MESSAGES` 在 `TaskStore.new` 截断快照消息（0 = 不限制）。
   - **删除（2 项）**：`NEW_SESSION_ON_START`（无消费点 + 不在 .env.example）、`SAVE_DEBUG_ARTIFACTS`（声明了却无落盘实现）。同步删掉 `.env.example` 的键与 `design.md` 的表格行。
   - **已接线无需改**：`SessionState.cap_failures`（lifecycle 读写）、`TaskSnapshot.recoveries`（tasks 序列化）。
   - 回归 `tests/test_config_wiring.py` 六条：删除的键彻底不在 config / .env.example、`TASK_KEEP_MESSAGES` 截断与 0 不限、`FILL_TIMEOUT_MS` / `READY_TIMEOUT_MS` 出现在对应源码中。
   - **踩坑**：删 `NEW_SESSION_ON_START` 时漏删 `.env.example` 的 `CLAUDE_NEW_SESSION` 行，被 `test_config_drift.py` 当场逮住——正是这套契约检查的价值。
-- [ ] **D6.3** 函数：`models.model_is_supported`、`session/lock.WARNED_BAD_STATE`、`errors.page_usable_reason` / `page_responds`（应接进 `ensure_usable` 与 readiness 判活）、`errors.is_page_lost_error` / `is_timeout_error`。
+- [x] **D6.3** 函数：`models.model_is_supported`、`session/lock.WARNED_BAD_STATE`、`errors.page_usable_reason` / `page_responds`（应接进 `ensure_usable` 与 readiness 判活）、`errors.is_page_lost_error` / `is_timeout_error`。
+  - **2026-10-13 完成**：
+    - `page_usable_reason` 接进 `driver.readiness()`（`page_status` 之前），关闭「死页面误报成功」缺口；
+    - `_find_visible` 区分 page-lost（抛 `NotReadyError`）/ timeout（记 `:timeout` 继续）/ 普通异常（记类型名继续），`is_page_lost_error` 与 `is_timeout_error` 都有了生产用点；
+    - `model_is_supported` 接进 `api/chat_adapter.to_task`，未知别名记 INFO 诊断；
+    - `session/lock.WARNED_BAD_STATE` **删除**（是 `SessionStore._warned_bad_state` 的影子副本）。
+  - 回归：`tests/test_browser.py` + `tests/test_config_wiring.py` 共 6 条；`doc/updates_deepseek.md` 附录 A 有详细记录。
 - [ ] **D6.4** 其它：`prompting.py` 里 `_OMISSION_NOTE` 的重复注释；`/bridge modal` 的「改状态」标注（实际不改会话状态）；确认 `session_store.py`（纯委托门面）、`main.py` 与 `claude_api_server.py`（重复入口）是否都要保留；先 grep 确认 `TaskStore.load / clear` 有无生产调用方。
+  - **2026-10-13 复核（部分）**：
+    - `_OMISSION_NOTE`：实测**只有一处定义**（`prompting.py:60`）+ 一处使用（`:514`），**没有重复注释**——该子项可划掉。
+    - `TaskStore.load / clear`：`grep -rn '\.load(\|\.clear(' claude_web/ | grep -i task` **无命中**（`TaskStore.load` 由 `responses_adapter` 的 `response_state.load` 调用，那是另一回事）——`TaskStore.clear` 待确认是否有测试外调用方。
+    - 其余（`/bridge modal` 标注、`session_store.py` / `main.py` 去留）**未处理**。
 
 ## 阶段 7：工程化（来源第 6 节）
 
-- [ ] **D7.1** 最小 CI：`.github/workflows` 跑 `ruff check` + `pytest`（跳过 e2e）；e2e 手动触发，最近一次真实探测日期记入 `doc/tasks.md`。
-- [ ] **D7.2** 类型：补 `[tool.mypy]`，先对 `errors`、`session/*`、`models`、`end_detection` 开启，或删掉 `pyproject.toml` 里的相关注释。
+- [x] **D7.1** 最小 CI：`.github/workflows` 跑 `ruff check` + `pytest`（跳过 e2e）；e2e 手动触发，最近一次真实探测日期记入 `doc/tasks.md`。
+  - **2026-10-13 完成**：新增 `.github/workflows/ci.yml`——`ruff check .` + `mypy` + `pytest -q`（Python 3.14，`pip install -e ".[dev]"`）。e2e 仍由 `CLAUDE_E2E=1` 手动触发，不进 CI。
+- [x] **D7.2** 类型：补 `[tool.mypy]`，先对 `errors`、`session/*`、`models`、`end_detection` 开启，或删掉 `pyproject.toml` 里的相关注释。
+  - **2026-10-13 完成**：`pyproject.toml` 新增 `[tool.mypy]`，`files` 覆盖这四个模块（8 个源文件），`ignore_missing_imports=true`；实跑 `mypy` → `Success: no issues found in 8 source files`。`mypy>=1.11` 已加入 `dev` extras 并接进 CI。**遗留**：全包仍有 5 处历史遗留（`toolcalls` / `page_pool` / `prompting` / `responses_adapter` / `server`），修完后再扩 `files` 清单。
 - [ ] **D7.3** 依赖：以 `pyproject.toml` 为准，`requirements.txt` 去重并加版本约束，生成锁文件；评估放宽 `requires-python`。
 - [ ] **D7.4** ruff 逐步加 `B`、`UP`、`SIM`。
 - [ ] **D7.5** 目录整洁：profile 备份（`user_data_chrome.bak-*` / `pre-refresh-*`）迁出项目根目录；`.gitignore` 去掉重复的 `.freebuff/`。

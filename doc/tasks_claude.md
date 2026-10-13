@@ -133,13 +133,16 @@
 
 - [ ] **T6.1** 指标：`request_retry_total`、`browser_unavailable_total`、`browser_selector_miss_total`、`reply_extraction_failure_total`、`session_recovery_total`、`tool_parse_failure_total`、`request_latency`、`reply_extraction_latency`。
 - [x] **T6.2** 配置与字段：`STREAM_KEEPALIVE_S`（见 T4.1）、`TASK_KEEP_MESSAGES`、`SessionState.cap_failures`、`TaskSnapshot.messages / recoveries`、状态 `queued / generating / recovering`。（与 D6.2 同一处落地，见 `doc/updates_deepseek.md`）
-- [ ] **T6.3** 函数：`model_is_supported`、`lock.WARNED_BAD_STATE`、`page_usable_reason` / `page_responds`（应接进 `ensure_usable` 与 readiness 判活）、`is_page_lost_error`、`is_timeout_error`。
+- [x] **T6.3** 函数：`model_is_supported`、`lock.WARNED_BAD_STATE`、`page_usable_reason` / `page_responds`（应接进 `ensure_usable` 与 readiness 判活）、`is_page_lost_error`、`is_timeout_error`。
+  - **2026-10-13 完成**（与 D6.3 同一处落地，见 `doc/updates_deepseek.md` 附录 A）：`page_usable_reason` 接进 `readiness`；`is_page_lost_error` / `is_timeout_error` 接进 `_find_visible`；`model_is_supported` 接进 `to_task`；`WARNED_BAD_STATE` 删除。6 条回归测试。
 - [ ] **T6.4** 其它：`_OMISSION_NOTE` 的重复注释；`/bridge modal` 的「改状态」标注；确认 `session_store.py`、`main.py` 与 `claude_api_server.py` 是否都要保留；先 grep 确认 `TaskStore.load / clear` 有无生产调用方。
 
 ## 阶段 7：工程化（来源第 6 节）
 
-- [ ] **T7.1** 最小 CI：`.github/workflows` 跑 `ruff check` + `pytest`（跳过 e2e）；e2e 手动触发。
-- [ ] **T7.2** 类型：补 `[tool.mypy]`，先对 `errors`、`session/*`、`models`、`end_detection` 开启，或删掉相关注释。
+- [x] **T7.1** 最小 CI：`.github/workflows` 跑 `ruff check` + `pytest`（跳过 e2e）；e2e 手动触发。
+  - **2026-10-13 完成**（与 D7.1 同一处落地）：`.github/workflows/ci.yml`（ruff + mypy + pytest）。
+- [x] **T7.2** 类型：补 `[tool.mypy]`，先对 `errors`、`session/*`、`models`、`end_detection` 开启，或删掉相关注释。
+  - **2026-10-13 完成**（与 D7.2 同一处落地）：`[tool.mypy]` 覆盖四个模块，8 文件零错误，已接进 CI。
 - [ ] **T7.3** 依赖：以 `pyproject.toml` 为准，`requirements.txt` 去重并加版本约束，生成锁文件；评估放宽 `requires-python`。
 - [ ] **T7.4** ruff 逐步加 `B`、`UP`、`SIM`。
 - [ ] **T7.5** 目录整洁：profile 备份迁出项目根目录；`.gitignore` 去掉重复的 `.freebuff/`。

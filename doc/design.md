@@ -323,6 +323,11 @@ assistant 节点（上一轮的回复），只凭「有节点」会把**上一�
 并允许按环境调节轮询间隔与各项时长阈值。链路等待时间可用 ``tools/bench_pipeline.py``
 （离线、虚拟时钟）复测。
 
+**Token 速度**：生成循环在 fill / submit / 首字 / 落定四处采 ``time.monotonic()`` 锚点，
+交给纯函数 ``completion.token_speed.compute_speed`` 算出 prefill / decode 速度（token 数
+用 ``estimate_tokens`` 估算）；流式路径额外填端到端口径。口径、公式与局限见
+``doc/tokenspeed.md``，查看入口是 ``/bridge token``。
+
 ## 5. 消息与会话管理
 
 ### 5.1 会话分桶
